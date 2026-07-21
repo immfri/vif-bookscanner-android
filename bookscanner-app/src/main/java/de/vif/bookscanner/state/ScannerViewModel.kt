@@ -51,6 +51,21 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     var captureInProgress by mutableStateOf(false)
         private set
 
+    // --- Capture-Fortschritt fuer die Visualisierung (CaptureScreen) ---
+
+    /** Anzahl Kameras, die in der laufenden Doppelseiten-Runde aufgenommen werden. */
+    var captureTotalCount by mutableStateOf(0)
+        private set
+
+    /** Anzahl Kameras, deren Aufnahme in der laufenden Runde bereits abgeschlossen ist. */
+    var captureCompletedCount by mutableStateOf(0)
+        private set
+
+    /** Kameras, deren Aufnahme in der laufenden Runde bereits fertig ist — fuer die
+     * Pro-Kamera-Statusanzeige (L fertig, R laeuft noch ...). */
+    var captureFinishedCameras by mutableStateOf<Set<CameraSelection>>(emptySet())
+        private set
+
     var lastCapturedFile by mutableStateOf<File?>(null)
         private set
 
@@ -243,8 +258,9 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         state = ScannerState.CAPTURE
         captureInProgress = true
         val capturedThisRound = mutableListOf<File>()
-        var completedCount = 0
-        val totalCount = connectedCameras.size
+        captureTotalCount = connectedCameras.size
+        captureCompletedCount = 0
+        captureFinishedCameras = emptySet()
 
         connectedCameras.forEach { camera ->
             val fileName = BookscanFileNamer.buildFileName(
@@ -256,8 +272,9 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             bridge.captureFullResolutionThenReturnToPreview(camera, targetFile) {
                 storageRepository.publishCapturedFile(targetFile)
                 capturedThisRound.add(targetFile)
-                completedCount += 1
-                if (completedCount >= totalCount) {
+                captureCompletedCount += 1
+                captureFinishedCameras = captureFinishedCameras + camera
+                if (captureCompletedCount >= captureTotalCount) {
                     captureInProgress = false
                     // Stabile L-vor-R-Reihenfolge fuer die Anzeige, unabhaengig davon,
                     // welche Kamera zuerst fertig wurde.

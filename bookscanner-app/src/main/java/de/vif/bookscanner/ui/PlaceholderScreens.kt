@@ -9,12 +9,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import de.vif.bookscanner.hardware.UvcCameraBridge
+import de.vif.bookscanner.state.CameraSelection
 import de.vif.bookscanner.state.ScannerViewModel
 
 /**
@@ -69,14 +72,49 @@ fun PreviewScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
     }
 }
 
+/**
+ * Aufnahme-Screen (State CAPTURE) mit klarer Nutzer-Signalisierung (User-Vorgabe 2026-07-21):
+ * grosser "NICHT BEWEGEN"-Hinweis + Fortschrittsbalken + Pro-Kamera-Status, solange die
+ * (parallele) Doppelseiten-Aufnahme laeuft. Sobald beide Kameras fertig sind, wechselt die
+ * State-Machine automatisch zu RECHECK — dort steht das explizite "Fertig, jetzt
+ * umblaettern"-Signal (siehe [RecheckScreen]).
+ */
 @Composable
 fun CaptureScreen(viewModel: ScannerViewModel) {
-    PlaceholderScaffold(
-        title = "Aufnahme (CAPTURE, volle Aufloesung)",
-        description = "Pflicht-Mode-Switch laeuft: UVCCameraHandler#resize auf volle Aufloesung, " +
-            "captureStill() schreibt 1 Frame binaer, danach zurueck auf 320x240."
+    Column(
+        modifier = Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text("Seite ${viewModel.pageNumber} wird aufgenommen ...")
+        Text(
+            text = "AUFNAHME LÄUFT — NICHT BEWEGEN",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.error
+        )
+        Text("Seite ${"%04d".format(viewModel.pageNumber)} wird in voller Auflösung aufgenommen.")
+
+        val total = viewModel.captureTotalCount
+        val done = viewModel.captureCompletedCount
+        if (total > 1) {
+            // Determinierter Balken: springt pro fertiger Kamera (0 -> 0,5 -> 1,0).
+            LinearProgressIndicator(
+                progress = { if (total > 0) done.toFloat() / total else 0f },
+                modifier = Modifier.fillMaxWidth()
+            )
+        } else {
+            // Einzelkamera: keine Zwischenschritte messbar -> laufender Balken.
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
+        Text("$done von $total Kameras fertig")
+
+        CameraSelection.entries.forEach { camera ->
+            val finished = camera in viewModel.captureFinishedCameras
+            Text(
+                text = if (finished) "Kamera $camera: ✓ fertig" else "Kamera $camera: läuft ...",
+                color = if (finished) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurface
+            )
+        }
     }
 }
 
@@ -84,11 +122,11 @@ fun CaptureScreen(viewModel: ScannerViewModel) {
 fun RecheckScreen(viewModel: ScannerViewModel) {
     val files = viewModel.lastCapturedFiles
     PlaceholderScaffold(
-        title = "Pruefung (RECHECK)",
+        title = "Aufnahme abgeschlossen ✓",
         description = if (files.isEmpty()) {
             "Keine Aufnahmen in dieser Runde."
         } else {
-            "Doppelseiten-Aufnahme abgeschlossen (${files.size} Datei(en)):"
+            "Live-Vorschau ist wieder aktiv — Seite jetzt umblättern, dann \"Next Page\"."
         }
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -1,55 +1,55 @@
 # VIF BookScanner (Android)
 
-Android-App für einen physischen Dual-Kamera-Buchscanner (2× USB-UVC-Webcam, z. B. ArduCAM IMX298 AF) — Ziel: bestmögliche, OCR-taugliche Aufnahmen von Buchseiten.
+Android app for a physical dual-camera book scanner (2x USB UVC webcam, e.g. ArduCAM IMX298 AF) — goal: best possible, OCR-ready captures of book pages.
 
-Copyright (c) 2026 Immanuel Friedrichsen — siehe [NOTICE](NOTICE) für die vollständige Copyright-/Lizenz-Zuordnung.
+Copyright (c) 2026 Immanuel Friedrichsen — see [NOTICE](NOTICE) for the full copyright/license attribution.
 
-Dieses Projekt ist ein **Fork von [saki4510t/UVCCamera](https://github.com/saki4510t/UVCCamera)** (Copyright (c) 2014-2017 saki t_saki@serenegiant.com). Der ursprüngliche UVC-Treiber diente als veraltete, aber solide Basis (letzte Aktivität ca. 2020) und wurde für dieses Projekt modernisiert und um eine vollständige App-Schicht ergänzt.
+This project is a **fork of [saki4510t/UVCCamera](https://github.com/saki4510t/UVCCamera)** (Copyright (c) 2014-2017 saki t_saki@serenegiant.com). The original UVC driver served as a dated but solid base (last upstream activity around 2020) and was modernized and extended with a full app layer for this project.
 
-Lizenz: **Apache License, Version 2.0** (siehe [LICENSE](LICENSE)) — für das gesamte Repository, Original wie Ergänzungen.
+License: **Apache License, Version 2.0** (see [LICENSE](LICENSE)) — for the entire repository, both original and additions.
 
 ---
 
-## Projektstruktur
+## Project structure
 
-| Modul | Inhalt |
+| Module | Content |
 |---|---|
-| `bookscanner-app` | Die eigentliche Android-App (Kotlin/Jetpack Compose): State Machine, Kamera-Kalibrierung, Settings-UI, Dateibenennung |
-| `libuvccamera` | UVC-Treiber (natives C++, JNI) — modernisiert (CMake statt ndk-build, AndroidX, mehrere Android-12/13/14-Kompatibilitätsfixes) |
-| `usbCameraCommon` | Handler-Schicht zwischen App und Treiber (`UVCCameraHandler`, UVC-Control-APIs) |
-| `usbCameraTest0`–`usbCameraTest8` | Original-Beispielprojekte aus dem Upstream-Repo (Referenz, nicht Teil der eigentlichen App) |
+| `bookscanner-app` | The actual Android app (Kotlin/Jetpack Compose): state machine, camera calibration, settings UI, file naming |
+| `libuvccamera` | UVC driver (native C++, JNI) — modernized (CMake instead of ndk-build, AndroidX, several Android 12/13/14 compatibility fixes) |
+| `usbCameraCommon` | Handler layer between app and driver (`UVCCameraHandler`, UVC control APIs) |
+| `usbCameraTest0`–`usbCameraTest8` | Original sample projects from the upstream repo (reference only, not part of the actual app) |
 
-## Kernfunktionen (bookscanner-app)
+## Core features (bookscanner-app)
 
-- Dual-Kamera-Anbindung (L/R) über einen USB-Hub, dynamische Auflösungswahl aus den tatsächlich unterstützten Kamera-Größen (kein fest hartcodiertes Kameramodell)
-- Preview (niedrige Auflösung) / Capture (volle Sensor-Auflösung) mit Pflicht-Mode-Switch — UVC-Webcams unterstützen keinen parallelen Stream, nur einen wechselbaren
-- Kamera-Kalibrierung: Automodus (Auto-Fokus/Auto-Weißabgleich einschwingen lassen, dann fixieren) und manueller Modus (Slider für alle UVC-Parameter, Live-Vorschau)
-- Fokus-Sweep-Kalibrierung: systematischer Durchlauf des Fokusbereichs, Schärfe-Lookup-Kurve (Laplace-Varianz) statt reinem Vertrauen auf die kamerainterne Auto-Logik
-- Pro-Aufnahme-Schärfeprüfung (statt festem Rekalibrierungs-Intervall): Fokus wird vor jeder Aufnahme erneut gesetzt + Schärfe gegen Referenzwert verglichen
-- Dateibenennung: `{Projektname}_S{Seite:04d}_{L|R}.jpg`, Zeitstempel in EXIF
+- Dual-camera connection (L/R) via a USB hub, dynamic resolution selection from the camera's actually supported sizes (no hardcoded camera model)
+- Preview (low resolution) / capture (full sensor resolution) with mandatory mode switch — UVC webcams don't support parallel streams, only one switchable stream
+- Camera calibration: auto mode (let auto-focus/auto-white-balance settle, then lock) and manual mode (sliders for all UVC parameters, live preview)
+- Focus sweep calibration: systematic scan across the focus range, sharpness lookup curve (Laplacian variance) instead of relying purely on the camera's built-in auto logic
+- Per-capture sharpness verification (instead of a fixed recalibration interval): focus is re-asserted before every shot + sharpness compared against the reference value
+- File naming: `{ProjectName}_S{Page:04d}_{L|R}.jpg`, timestamp in EXIF
 
-Vollständiges Konzept/Entwicklungsverlauf (nur intern, nicht Teil dieses Repos): `04-projects/vif-bookscanner/android/plan-2026-07-21-android-portierung.md` im privaten KI-OS-Vault.
+Full concept/development history (internal only, not part of this repo): `04-projects/vif-bookscanner/android/plan-2026-07-21-android-portierung.md` in the private KI-OS vault.
 
 ## Build
 
-Standard-Android-Gradle-Build:
+Standard Android Gradle build:
 
 ```
 ./gradlew.bat :bookscanner-app:assembleDebug
 ```
 
-Benötigt Android SDK + NDK (siehe `local.properties`).
+Requires Android SDK + NDK (see `local.properties`).
 
 ---
 
-## Herkunft: UVCCamera (Original-Upstream)
+## Origin: UVCCamera (original upstream)
 
-Der ursprüngliche `library and sample to access to UVC web camera on non-rooted Android device`-Code von saki4510t bildet die technische Basis der `libuvccamera`/`usbCameraCommon`-Module sowie der `usbCameraTestN`-Beispielprojekte. Änderungshistorie des Originals: [github.com/saki4510t/UVCCamera](https://github.com/saki4510t/UVCCamera).
+The original `library and sample to access to UVC web camera on non-rooted Android device` code by saki4510t forms the technical basis of the `libuvccamera`/`usbCameraCommon` modules as well as the `usbCameraTestN` sample projects. Original changelog: [github.com/saki4510t/UVCCamera](https://github.com/saki4510t/UVCCamera).
 
-Wesentliche Modernisierungen gegenüber dem Original (Details siehe [NOTICE](NOTICE) und Git-Historie dieses Repos):
-- JCenter (2021/22 abgeschaltet) → mavenCentral/google
+Key modernizations compared to the original (details in [NOTICE](NOTICE) and this repo's git history):
+- JCenter (shut down 2021/22) → mavenCentral/google
 - Android Gradle Plugin 3.1.4 → 8.5.2, Gradle Wrapper 4.4 → 8.7
 - `ndk-build`/`Android.mk` → CMake
-- AndroidX-Migration
-- Mehrere Android-12/13/14-Laufzeit-Kompatibilitätsfixes (PendingIntent-Flags, `RECEIVER_EXPORTED`, USB-Permission-Timing)
-- Echte Implementierung von `resize()` (war im Original ein permanenter `UnsupportedOperationException`-Stub)
+- AndroidX migration
+- Several Android 12/13/14 runtime compatibility fixes (PendingIntent flags, `RECEIVER_EXPORTED`, USB permission timing)
+- Real implementation of `resize()` (was a permanent `UnsupportedOperationException` stub in the original)

@@ -1,21 +1,22 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 buildscript {
     repositories {
-//		google()
-		maven { url 'https://maven.google.com' }
-        jcenter()
+        google()
+        mavenCentral()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:3.1.4'
+        classpath 'com.android.tools.build:gradle:8.5.2'
     }
 }
 
 allprojects {
     repositories {
-//    	google()
-		maven { url 'https://maven.google.com' }
-		jcenter()
-		maven { url 'http://raw.github.com/saki4510t/libcommon/master/repository/' }
+        google()
+        mavenCentral()
+        // Korrigierte Domain: raw.github.com wurde 2018 abgeschaltet, die Inhalte
+        // liegen weiterhin unter raw.githubusercontent.com (per WebFetch verifiziert, 2026-07-21).
+        maven { url 'https://raw.githubusercontent.com/saki4510t/libcommon/master/repository/' }
+        maven { url 'https://jitpack.io' }
     }
 }
 
@@ -26,9 +27,15 @@ task clean(type: Delete) {
 ext {
 	supportLibVersion = '27.1.1'  // variable that can be referenced to keep support libs consistent
 	commonLibVersion= '2.12.4'
-	versionBuildTool = '27.0.3'
-	versionCompiler = 27
-	versionTarget = 27
+	versionBuildTool = '35.0.0'
+	versionCompiler = 35
+	versionTarget = 35
+	// minSdk 24 (Android 7.0): konservative dokumentierte Annahme. Recherche 2026-07-21 (WebSearch,
+	// apilevels.com/Statcounter) zeigt >95% Abdeckung erst ab API 28 exakt belegt; der genaue Punkt,
+	// ab dem API 24 selbst >95% erreicht, war nicht mit Quelle belegbar. Da dies eine App fuer ein
+	// einzelnes bekanntes Testgeraet (Xiaomi 11T Pro 5G, Android 12+) ist, ist 24 ein sicherer,
+	// unkritischer Kompromiss statt eines aggressiveren Anhebens auf 28+.
+	versionMinSdk = 24
 	versionNameString = '1.0.0'
 	javaSourceCompatibility = JavaVersion.VERSION_1_8
 	javaTargetCompatibility = JavaVersion.VERSION_1_8

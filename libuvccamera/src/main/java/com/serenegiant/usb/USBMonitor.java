@@ -167,11 +167,29 @@ public final class USBMonitor {
 			if (DEBUG) Log.i(TAG, "register:");
 			final Context context = mWeakContext.get();
 			if (context != null) {
-				mPermissionIntent = PendingIntent.getBroadcast(context, 0, new Intent(ACTION_USB_PERMISSION), 0);
+				// Android 12+ (API 31+) verlangt FLAG_IMMUTABLE/FLAG_MUTABLE explizit.
+				// FLAG_MUTABLE ist hier zwingend: UsbManager.requestPermission() haengt
+				// EXTRA_PERMISSION_GRANTED/EXTRA_DEVICE zur Laufzeit an den Intent an,
+				// was bei FLAG_IMMUTABLE fehlschlaegt (dokumentiertes Android-Verhalten).
+				// Android 14+ (API 34+) verbietet zusaetzlich FLAG_MUTABLE bei IMPLIZITEN
+				// Intents -> Intent per setPackage() explizit auf die eigene App einschraenken.
+				final Intent permissionIntent = new Intent(ACTION_USB_PERMISSION);
+				permissionIntent.setPackage(context.getPackageName());
+				final int piFlags = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
+					? PendingIntent.FLAG_MUTABLE : 0;
+				mPermissionIntent = PendingIntent.getBroadcast(context, 0, permissionIntent, piFlags);
 				final IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
 				// ACTION_USB_DEVICE_ATTACHED never comes on some devices so it should not be added here
 				filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
-				context.registerReceiver(mUsbReceiver, filter);
+				// Android 13+ (API 33+) verlangt RECEIVER_EXPORTED/RECEIVER_NOT_EXPORTED explizit.
+				// NOT_EXPORTED: ACTION_USB_PERMISSION ist jetzt ein expliziter Intent (nur die
+				// eigene App), ACTION_USB_DEVICE_DETACHED wird als System-Broadcast unabhaengig
+				// vom Export-Flag zugestellt.
+				if (android.os.Build.VERSION.SDK_INT >= 33) {
+					context.registerReceiver(mUsbReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+				} else {
+					context.registerReceiver(mUsbReceiver, filter);
+				}
 			}
 			// start connection check
 			mDeviceCounts = 0;

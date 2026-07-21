@@ -87,6 +87,8 @@ abstract class AbstractUVCCameraHandler extends Handler {
 	private static final int MSG_CAPTURE_STOP = 6;
 	private static final int MSG_MEDIA_UPDATE = 7;
 	private static final int MSG_RELEASE = 9;
+	/** ERGAENZUNG (vif-bookscanner, 2026-07-21): echtes Mid-Stream-Resize, siehe {@link #resize(int, int)}. */
+	private static final int MSG_RESIZE = 10;
 
 	private final WeakReference<AbstractUVCCameraHandler.CameraThread> mWeakThread;
 	private volatile boolean mReleased;
@@ -112,8 +114,7 @@ abstract class AbstractUVCCameraHandler extends Handler {
 	 * Platzhalter, bis nach {@link #open}/{@link #getCamera()} die tatsaechlich unterstuetzten
 	 * Groessen der jeweils angeschlossenen Kamera bekannt sind. Wirkt NUR vor dem ersten
 	 * startPreview() bzw. nach einem stopPreview() — waehrend eine Preview aktiv laeuft, aendert
-	 * dies nichts (echtes Mid-Stream-Resize ist {@link #resize(int, int)} vorbehalten, das in
-	 * dieser Codebasis aktuell nirgends implementiert ist, siehe dortiger Default-Wurf).
+	 * dies nichts (echtes Mid-Stream-Resize ist {@link #resize(int, int)} vorbehalten).
 	 */
 	public void setPreviewSize(final int width, final int height) {
 		final CameraThread thread = mWeakThread.get();
@@ -172,9 +173,22 @@ abstract class AbstractUVCCameraHandler extends Handler {
 		if (DEBUG) Log.v(TAG, "close:finished");
 	}
 
+	/**
+	 * Aendert die Preview-Groesse WAEHREND eine Preview laeuft (echtes Mid-Stream-Resize).
+	 * IMPLEMENTIERUNG (vif-bookscanner, 2026-07-21): vorher permanenter Stub-Wurf
+	 * ({@code UnsupportedOperationException}) — der komplette Capture-Mode-Switch-Mechanismus
+	 * in {@code UvcCameraBridge.kt} (Preview- <-> Capture-Aufloesung) war dadurch ein stiller
+	 * No-Op. Laeuft ueber das gleiche Message-Passing-Muster wie {@link #startPreview(Object)}/
+	 * {@link #stopPreview()} auf dem {@link CameraThread}: dort Preview stoppen, neue Groesse
+	 * via {@link UVCCamera#setPreviewSize} setzen (identische API wie in
+	 * {@link CameraThread#handleStartPreview(Object)}), mit der zwischengespeicherten Surface
+	 * neu starten. Falls die Kamera die Groesse nicht unterstuetzt (IllegalArgumentException),
+	 * wird das analog zu {@code handleStartPreview} geloggt/gemeldet und die alte Groesse
+	 * (Preview bleibt bei bisheriger Aufloesung) beibehalten statt abzustuerzen.
+	 */
 	public void resize(final int width, final int height) {
 		checkReleased();
-		throw new UnsupportedOperationException("does not support now");
+		sendMessage(obtainMessage(MSG_RESIZE, width, height));
 	}
 
 	protected void startPreview(final Object surface) {
@@ -440,6 +454,9 @@ abstract class AbstractUVCCameraHandler extends Handler {
 		case MSG_MEDIA_UPDATE:
 			thread.handleUpdateMedia((String)msg.obj);
 			break;
+		case MSG_RESIZE:
+			thread.handleResize(msg.arg1, msg.arg2);
+			break;
 		case MSG_RELEASE:
 			thread.handleRelease();
 			break;
@@ -459,6 +476,12 @@ abstract class AbstractUVCCameraHandler extends Handler {
 		private int mWidth, mHeight, mPreviewMode;
 		private float mBandwidthFactor;
 		private boolean mIsPreviewing;
+		/**
+		 * zuletzt fuer {@link #handleStartPreview(Object)} genutzte Surface, zwischengespeichert
+		 * fuer {@link #handleResize(int, int)} (ERGAENZUNG vif-bookscanner, 2026-07-21) — braucht
+		 * dieselbe Surface, um die Preview nach dem Groessenwechsel wieder zu starten.
+		 */
+		private Object mPreviewSurface;
 		private boolean mIsRecording;
 		/**
 		 * shutter sound
@@ -598,6 +621,7 @@ abstract class AbstractUVCCameraHandler extends Handler {
 		public void handleStartPreview(final Object surface) {
 			if (DEBUG) Log.v(TAG_THREAD, "handleStartPreview:");
 			if ((mUVCCamera == null) || mIsPreviewing) return;
+			mPreviewSurface = surface;
 			try {
 				mUVCCamera.setPreviewSize(mWidth, mHeight, 1, 31, mPreviewMode, mBandwidthFactor);
 			} catch (final IllegalArgumentException e) {
@@ -637,6 +661,87 @@ abstract class AbstractUVCCameraHandler extends Handler {
 				callOnStopPreview();
 			}
 			if (DEBUG) Log.v(TAG_THREAD, "handleStopPreview:finished");
+		}
+
+		/**
+		 * Echtes Mid-Stream-Resize (ERGAENZUNG vif-bookscanner, 2026-07-21): Preview stoppen,
+		 * neue Groesse setzen, mit der zwischengespeicherten Surface ({@link #mPreviewSurface})
+		 * neu starten. Laeuft auf dem CameraThread (ueber MSG_RESIZE), analog zu
+		 * {@link #handleStartPreview(Object)}/{@link #handleStopPreview()}. Wird die neue
+		 * Groesse von der Kamera nicht unterstuetzt, bleibt die alte Preview-Groesse aktiv
+		 * (kein Absturz) — genau wie der bestehende Fallback in handleStartPreview.
+		 */
+		public void handleResize(final int width, final int height) {
+			if (DEBUG) Log.v(TAG_THREAD, "handleResize:width=" + width + ",height=" + height);
+			if (mUVCCamera == null) return;
+			if (mPreviewSurface == null) {
+				Log.w(TAG_THREAD, "handleResize: keine gespeicherte Preview-Surface vorhanden, breche ab");
+				return;
+			}
+			final int oldWidth = mWidth;
+			final int oldHeight = mHeight;
+			final boolean wasPreviewing = mIsPreviewing;
+			if (wasPreviewing) {
+				mUVCCamera.stopPreview();
+				synchronized (mSync) {
+					mIsPreviewing = false;
+				}
+			}
+			synchronized (mSync) {
+				mWidth = width;
+				mHeight = height;
+			}
+			final boolean applied = restartPreviewWithCurrentSize(wasPreviewing);
+			if (!applied) {
+				// neue Groesse von der Kamera abgelehnt: alte Groesse wiederherstellen,
+				// analog zum Fallback-Verhalten von handleStartPreview.
+				Log.w(TAG_THREAD, "handleResize: Groesse " + width + "x" + height + " nicht unterstuetzt, bleibe bei " + oldWidth + "x" + oldHeight);
+				synchronized (mSync) {
+					mWidth = oldWidth;
+					mHeight = oldHeight;
+				}
+				restartPreviewWithCurrentSize(wasPreviewing);
+			}
+		}
+
+		/**
+		 * Setzt {@link #mUVCCamera} auf die aktuell in {@link #mWidth}/{@link #mHeight} gesetzte
+		 * Groesse (mit YUV-Fallback wie in {@link #handleStartPreview(Object)}) und startet die
+		 * Preview bei Bedarf ({@code startPreviewAfter}) auf der zwischengespeicherten
+		 * {@link #mPreviewSurface} neu. Hilfsmethode fuer {@link #handleResize(int, int)} —
+		 * sowohl fuer den Erfolgsfall (neue Groesse) als auch den Fallback-Fall (alte Groesse
+		 * wiederherstellen). Liefert false, wenn die Groesse von der Kamera abgelehnt wurde
+		 * (auch im YUV-Fallback) — dann bleibt die Preview gestoppt und der Aufrufer muss die
+		 * alte Groesse wiederherstellen.
+		 */
+		private boolean restartPreviewWithCurrentSize(final boolean startPreviewAfter) {
+			try {
+				mUVCCamera.setPreviewSize(mWidth, mHeight, 1, 31, mPreviewMode, mBandwidthFactor);
+			} catch (final IllegalArgumentException e) {
+				try {
+					mUVCCamera.setPreviewSize(mWidth, mHeight, 1, 31, UVCCamera.DEFAULT_PREVIEW_MODE, mBandwidthFactor);
+				} catch (final IllegalArgumentException e1) {
+					Log.w(TAG_THREAD, "restartPreviewWithCurrentSize: setPreviewSize fehlgeschlagen fuer " + mWidth + "x" + mHeight, e1);
+					callOnError(e1);
+					return false;
+				}
+			}
+			if (startPreviewAfter) {
+				if (mPreviewSurface instanceof SurfaceHolder) {
+					mUVCCamera.setPreviewDisplay((SurfaceHolder)mPreviewSurface);
+				} else if (mPreviewSurface instanceof Surface) {
+					mUVCCamera.setPreviewDisplay((Surface)mPreviewSurface);
+				} else {
+					mUVCCamera.setPreviewTexture((SurfaceTexture)mPreviewSurface);
+				}
+				mUVCCamera.startPreview();
+				mUVCCamera.updateCameraParams();
+				synchronized (mSync) {
+					mIsPreviewing = true;
+				}
+				callOnStartPreview();
+			}
+			return true;
 		}
 
 		public void handleCaptureStill(final String path) {

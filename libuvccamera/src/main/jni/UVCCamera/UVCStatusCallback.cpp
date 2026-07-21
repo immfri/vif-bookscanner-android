@@ -77,11 +77,21 @@ void UVCStatusCallback::uvc_status_callback(uvc_status_class status_class, int e
 	UVCStatusCallback *statusCallback = reinterpret_cast<UVCStatusCallback *>(user_ptr);
 
 	JavaVM *vm = getVM();
-	JNIEnv *env;
-	// attach to JavaVM
-	vm->AttachCurrentThread(&env, NULL);
+	JNIEnv *env = NULL;
+	// FIX (2026-07-21): same unconditional Attach/Detach defect as in
+	// UVCButtonCallback::uvc_button_callback — detaching a thread that was already attached
+	// (e.g. the Java CameraThread) aborts with "attempting to detach while still running
+	// code". Only detach when we attached ourselves.
+	const bool alreadyAttached =
+		vm->GetEnv((void **)&env, JNI_VERSION_1_6) == JNI_OK && env != NULL;
+	if (!alreadyAttached && vm->AttachCurrentThread(&env, NULL) != JNI_OK) {
+		LOGW("uvc_status_callback: AttachCurrentThread failed");
+		return;
+	}
 
 	statusCallback->notifyStatusCallback(env, status_class, event, selector, status_attribute, data, data_len);
-	
-	vm->DetachCurrentThread();
+
+	if (!alreadyAttached) {
+		vm->DetachCurrentThread();
+	}
 }

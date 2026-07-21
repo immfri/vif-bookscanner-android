@@ -168,6 +168,16 @@ class UvcCameraBridge(
     private var pendingCtrlBlockL: UsbControlBlock? = null
     private var pendingCtrlBlockR: UsbControlBlock? = null
 
+    /** ROOT CAUSE FIX 2026-07-21: unlike pendingCtrlBlockL/R these are NEVER cleared, because
+     * [reopenAtSize] needs a valid control block for every resolution change: it closes the
+     * camera connection completely and reopens it with the same block, replacing the previous
+     * in-place resize() in BOTH directions. resize() upwards never produced a complete frame
+     * above 640x480, and resize() downwards left the restarted stream permanently broken
+     * ("Application transferred too few scanlines" on every frame). Verified live at
+     * 4656x3496 on both cameras. */
+    private var savedCtrlBlockL: UsbControlBlock? = null
+    private var savedCtrlBlockR: UsbControlBlock? = null
+
     // FIX Bug 1 (Race Condition Slot-Zuweisung, 2026-07-21): handler.open() ist ASYNCHRON
     // (postet nur eine MSG_OPEN-Message an den CameraThread, siehe AbstractUVCCameraHandler#open
     // -> sendMessage). handlerX?.isOpened wird deshalb NICHT sofort nach dem Aufruf von
@@ -252,22 +262,15 @@ class UvcCameraBridge(
             Log.i(TAG, "resolveCameraSizes($camera): Preview dynamisch ermittelt: ${preview.width}x${preview.height} (Ziel nahe 320x240, ${sizes.size} echte Groessen gemeldet)")
         }
 
-        // KORREKTUR 2026-07-21 (0-Byte-Capture-Untersuchung, vollstaendig aufgeklaert):
-        // Die 0-Byte-Captures hatten ZWEI unabhaengige Ursachen, beide gefunden und behoben:
-        // (1) PIXEL_FORMAT_RAW lieferte unkomprimierte Rohpixel statt JPEG-Bytes (Hex-Dump-
-        //     verifiziert) -> Fix: PIXEL_FORMAT_NV21 + YuvImage.compressToJpeg.
-        // (2) state=ScannerState.CAPTURE zerstoerte per Screen-Wechsel die TextureView-
-        //     Surface mitten im laufenden Capture (native Log bewies konkurrierenden
-        //     zweiten startPreview()-Aufruf) -> Fix: state bleibt waehrend der Aufnahme auf
-        //     PREVIEW (siehe ScannerViewModel.start_capture-Kommentar).
-        // Systematisch durchgetestet MIT beiden Fixes (also ohne jede der beiden Stoerungen):
-        // 640x480 gelingt sofort und zuverlaessig (beide Kameras), 1280x720/1920x1080/
-        // 4656x3496 liefern reproduzierbar NIE einen vollstaendigen Frame (weder Raw/NV21-
-        // noch TextureView-Fallback-Pfad, auch mit bis zu 15s Geduld) — das ist damit eine
-        // echte Hardware-/Firmware-Grenze dieses Kamera-Moduls bei Bulk-Transfer-Streaming
-        // ueber 640x480, keine Software-Frage mehr. 640x480 ist daher die aktuell einzige
-        // verifiziert nutzbare Capture-Groesse.
-        sizes.minByOrNull { kotlin.math.abs(it.width.toLong() * it.height - 640L * 480L) }?.let { capture ->
+        // KORREKTUR 2026-07-21 (0-Byte-Capture-Untersuchung, vollstaendig geloest): drei
+        // unabhaengige Software-Ursachen gefunden und behoben — (1) PIXEL_FORMAT_RAW lieferte
+        // unkomprimierte Rohpixel statt JPEG-Bytes -> PIXEL_FORMAT_NV21 + YuvImage; (2)
+        // Screen-Wechsel PREVIEW->CAPTURE zerstoerte die Surface mitten im Capture -> state
+        // bleibt auf PREVIEW; (3) In-Place-resize() lieferte oberhalb 640x480 reproduzierbar
+        // nie einen vollstaendigen Frame -> reopenAtSize() (volles Schliessen+Neuoeffnen)
+        // beim Hochschalten, siehe [captureFullResolutionThenReturnToPreview]. Maximale
+        // Groesse ist damit wieder das Ziel.
+        sizes.maxByOrNull { it.width.toLong() * it.height }?.let { capture ->
             when (camera) {
                 CameraSelection.LEFT -> resolvedCaptureSizeL = capture.width to capture.height
                 CameraSelection.RIGHT -> resolvedCaptureSizeR = capture.width to capture.height
@@ -512,6 +515,72 @@ class UvcCameraBridge(
     }
 
     /**
+     * ROOT CAUSE FIX 2026-07-21: closes the camera connection COMPLETELY (handler.close() ->
+     * UVCCamera.destroy()) and reopens it at [width]x[height] using the same, permanently
+     * retained [UsbControlBlock] (see savedCtrlBlockL/R). This is the only reliable way to
+     * change resolution on this camera — in-place resize() breaks the stream in both
+     * directions (no complete frames above 640x480 going up, "too few scanlines" on every
+     * frame coming back down). Modelled on the reference Python/OpenCV script, which also
+     * releases and reopens the capture device per resolution change.
+     *
+     * [onReady] fires on the main thread AFTER startPreview() ran for the new size.
+     */
+    private fun reopenAtSize(camera: CameraSelection, width: Int, height: Int, onReady: () -> Unit) {
+        val handler = handlerFor(camera)
+        val ctrlBlock = when (camera) {
+            CameraSelection.LEFT -> savedCtrlBlockL
+            CameraSelection.RIGHT -> savedCtrlBlockR
+        }
+        if (handler == null || ctrlBlock == null) {
+            listener.onError(camera, IllegalStateException("reopenAtSize($camera): kein Handler/ControlBlock"))
+            onReady()
+            return
+        }
+        val callback = object : CameraCallback {
+            override fun onOpen() {
+                mainHandler.post {
+                    startPreview(camera)
+                    onReady()
+                }
+                handler.removeCallback(this)
+            }
+            override fun onClose() {
+                mainHandler.post {
+                    try {
+                        handler.setPreviewSize(width, height)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "reopenAtSize($camera): setPreviewSize fehlgeschlagen", e)
+                    }
+                    try {
+                        handler.open(ctrlBlock)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "reopenAtSize($camera): open() fehlgeschlagen", e)
+                        listener.onError(camera, e)
+                        onReady()
+                    }
+                }
+            }
+            override fun onStartPreview() {}
+            override fun onStopPreview() {}
+            override fun onStartRecording() {}
+            override fun onStopRecording() {}
+            override fun onError(e: Exception?) {
+                mainHandler.post {
+                    listener.onError(camera, e ?: IllegalStateException("reopenAtSize($camera): Fehler"))
+                }
+            }
+        }
+        handler.addCallback(callback)
+        try {
+            handler.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "reopenAtSize($camera): close() fehlgeschlagen", e)
+            handler.removeCallback(callback)
+            onReady()
+        }
+    }
+
+    /**
      * Pflicht-Mode-Switch + Capture: schaltet kurz auf volle Sensor-Aufloesung, nimmt genau
      * einen Frame binaer auf (via UVCCameraHandler#captureStill, kein manuelles Decode/Encode
      * im App-Code) und schaltet danach zurueck auf die Vorschau-Aufloesung.
@@ -562,30 +631,32 @@ class UvcCameraBridge(
         val (captureW, captureH) = captureSizeFor(camera)
         val (previewW, previewH) = previewSizeFor(camera)
 
-        // GEPRUEFT UND VERWORFEN 2026-07-21: ein Versuch, die jeweils andere Kamera waehrend
-        // des Voll-Aufloesungs-Moments per stopPreview() anzuhalten (Hypothese: Bulk-Transfer-
-        // Kontention der Zweitkamera verursacht die "too few scanlines"-Fehler oberhalb
-        // 640x480). Live verifiziert (stopPreview() lief nachweislich, isPreviewing danach
-        // false) — die Fehler traten identisch weiter auf, auch mit komplett pausierter
-        // Zweitkamera. Root Cause war stattdessen der Screen-Wechsel PREVIEW->CAPTURE (siehe
-        // ScannerViewModel.start_capture-Kommentar); die verbleibende Groessen-Grenze
-        // (>640x480 scheitert reproduzierbar, siehe resolveCameraSizes-Kommentar) ist eine
-        // echte Hardware-/Firmware-Grenze dieser Kamera, keine Software-Frage.
-        try {
-            handler.resize(captureW, captureH, 1.0f)
-            handler.captureStill(targetFile.absolutePath)
-            handler.resize(previewW, previewH, DUAL_PREVIEW_BANDWIDTH_FACTOR)
-        } catch (e: Exception) {
-            listener.onError(camera, e)
-        }
-        // Vierte Message: laeuft auf dem CameraThread erst nach den drei obigen — sicherer
-        // "alles fertig"-Zeitpunkt, zurueck auf den Main-Thread fuer Verify + UI-Callback.
-        handler.post {
-            mainHandler.post {
-                applyManualControls(camera, controlPrefs.load(camera))
-                applyExifMetadata(camera, targetFile)
-                verifyFocusAfterCapture(camera, targetFile)
-                onDone()
+        // ROOT CAUSE FIX 2026-07-21: switch resolution in BOTH directions via reopenAtSize()
+        // (full close + reopen). In-place resize() never delivers a usable stream on this
+        // camera: upwards it produced no complete frame above 640x480, and downwards every
+        // single frame failed with "Application transferred too few scanlines" (verified in
+        // logcat), which left the live preview black and made the preview reference
+        // measurement read 0.0. An earlier hybrid kept resize() for the down-switch only
+        // because a second close()/destroy() cycle crashed the app natively — that crash was
+        // an unconditional DetachCurrentThread() in UVCButtonCallback/UVCStatusCallback and
+        // is fixed at the source now, so the clean path is usable both ways.
+        reopenAtSize(camera, captureW, captureH) {
+            try {
+                handler.captureStill(targetFile.absolutePath)
+            } catch (e: Exception) {
+                listener.onError(camera, e)
+            }
+            // Fourth message: runs on the CameraThread only after the ones above — a safe
+            // "everything finished" point. Switch back down, then verify on the main thread.
+            handler.post {
+                mainHandler.post {
+                    reopenAtSize(camera, previewW, previewH) {
+                        applyManualControls(camera, controlPrefs.load(camera))
+                        applyExifMetadata(camera, targetFile)
+                        verifyFocusAfterCapture(camera, targetFile)
+                        onDone()
+                    }
+                }
             }
         }
     }
@@ -760,23 +831,12 @@ class UvcCameraBridge(
                 null
             } ?: return@postDelayed
 
-            // Ab hier: voller Fokus-Sweep in Capture-Aufloesung (Punkt 1). Mode-Switch einmal
-            // hoch, alle Sweep-Schritte darin, dann einmal zurueck (statt pro Schritt zu
-            // wechseln — deutlich schneller, volle Aufloesung ist trotzdem waehrend des
-            // gesamten Sweeps aktiv).
+            // From here: full focus sweep at capture resolution. Switch up via reopenAtSize()
+            // (full close() + open() cycle), NOT via resize() — in-place resize() stops
+            // delivering complete frames above 640x480. See
+            // [captureFullResolutionThenReturnToPreview] for the full root-cause notes.
             val (captureW, captureH) = captureSizeFor(camera)
-            try {
-                // Volle Bandbreite (1.0) noetig — siehe Root-Cause-Fix in
-                // [captureFullResolutionThenReturnToPreview]: mit dem Dual-Preview-Faktor 0.5
-                // kommen Capture-Aufloesungs-Frames nur unvollstaendig an ("too few scanlines"),
-                // die andere Kamera braucht waehrend des Sweeps ohnehin keine eigene Bandbreite
-                // (siehe [runFocusSweep]-Aufrufer, Sweep laeuft sequenziell je Kamera).
-                handler.resize(captureW, captureH, 1.0f)
-            } catch (e: Exception) {
-                Log.w(TAG, "calibrateAuto($camera): resize auf Capture-Aufloesung ${captureW}x$captureH fuer Sweep fehlgeschlagen", e)
-            }
-
-            mainHandler.postDelayed({
+            reopenAtSize(camera, captureW, captureH) {
                 runFocusSweep(camera) { curve ->
                     val peak = curve.maxByOrNull { it.second }
                     val peakFocus = peak?.first ?: fixed.focus
@@ -787,32 +847,22 @@ class UvcCameraBridge(
                         Log.w(TAG, "calibrateAuto($camera): Setzen des Sweep-Peak-Fokus fehlgeschlagen", e)
                     }
 
+                    // Switch back down via reopenAtSize() as well — see the equivalent comment
+                    // in [captureFullResolutionThenReturnToPreview]: in-place resize() left
+                    // the restarted stream permanently broken ("too few scanlines" on every
+                    // frame), which is what made this reference measurement read 0.0.
                     val (previewW, previewH) = previewSizeFor(camera)
-                    try {
-                        // BUGFIX 2026-07-21 (live am Geraet reproduziert): ohne den geteilten
-                        // Bandbreitenfaktor blieb die Live-Vorschau nach der Kalibrierung
-                        // dauerhaft schwarz (kontinuierliche "too few scanlines"-Fehler auch
-                        // Minuten spaeter) — die zweite Kamera laeuft parallel weiter und
-                        // beansprucht ihre Haelfte der USB2-Bandbreite, siehe
-                        // DUAL_PREVIEW_BANDWIDTH_FACTOR-Verwendung in [startPreview]/
-                        // [captureFullResolutionThenReturnToPreview].
-                        handler.resize(previewW, previewH, DUAL_PREVIEW_BANDWIDTH_FACTOR)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "calibrateAuto($camera): resize zurueck auf Preview-Aufloesung ${previewW}x$previewH fehlgeschlagen", e)
-                    }
-
-                    // Zweiter, EIGENER Referenzwert in Preview-Aufloesung (Punkt 3) — kein
-                    // weiterer Modus-Wechsel mehr noetig, wir sind bereits zurueck auf Preview.
-                    mainHandler.postDelayed({
+                    reopenAtSize(camera, previewW, previewH) {
+                        // Second, separate reference value at preview resolution.
                         val previewRefFile = File(activity.cacheDir, "calibration_ref_preview_${camera}_${System.currentTimeMillis()}.jpg")
                         try {
                             handler.captureStill(previewRefFile.absolutePath)
                         } catch (e: Exception) {
-                            Log.w(TAG, "calibrateAuto($camera): Preview-Referenz-Still fehlgeschlagen, referenceSharpnessPreview bleibt 0.0", e)
+                            Log.w(TAG, "calibrateAuto($camera): preview reference still failed, referenceSharpnessPreview stays 0.0", e)
                         }
-                        // BUGFIX 2026-07-21 (siehe runFocusSweep-Kommentar): gleiches Race —
-                        // captureStill() ist asynchron, handler.post{} garantiert echten
-                        // Abschluss vor dem Messen statt eines geratenen Fix-Delays.
+                        // Same race as in runFocusSweep: captureStill() is asynchronous, so
+                        // handler.post{} guarantees real completion before measuring instead
+                        // of relying on a guessed fixed delay.
                         handler.post {
                             mainHandler.post {
                                 val referenceSharpnessPreview = measureSharpness(previewRefFile, camera) ?: 0.0
@@ -828,9 +878,9 @@ class UvcCameraBridge(
                                 onResult(result)
                             }
                         }
-                    }, CAPTURE_SETTLE_DELAY_MS)
+                    }
                 }
-            }, CAPTURE_SETTLE_DELAY_MS)
+            }
         }, AUTO_CALIBRATION_SETTLE_DELAY_MS)
     }
 
@@ -911,25 +961,32 @@ class UvcCameraBridge(
         )
 
     /**
-     * Schnelle Vor-Aufnahme-Pruefung (Punkt 3, zweistufige Messung): misst die Schaerfe des
-     * AKTUELLEN Live-Preview-Frames (ueber [CameraViewInterface.captureStillImage], synchron,
-     * KEIN Modus-Wechsel, KEINE Datei) und vergleicht sie gegen
-     * [UvcControlSet.referenceSharpnessPreview]. Bei Unterschreitung wird — falls Auto-Retry
-     * aktiv und eine Sweep-Kurve vorliegt — sofort per lokaler Kurvensuche korrigiert
-     * ([correctFocusUsingCurve]), BEVOR ueberhaupt der teure Capture-Mode-Switch beginnt.
-     * Reiner Optimierungs-/Fruehwarn-Schritt — die eigentliche, autoritative Pruefung bleibt
-     * [verifyFocusAfterCapture] auf dem tatsaechlich gespeicherten Vollaufloesungs-Bild.
+     * Fast pre-capture check: measures the sharpness of the CURRENT live preview frame (no
+     * mode switch, no file) and compares it against [UvcControlSet.referenceSharpnessPreview].
+     * If it falls short — and auto retry is enabled and a sweep curve exists — the focus is
+     * corrected via local curve search ([correctFocusUsingCurve]) BEFORE the expensive capture
+     * mode switch even starts. Pure optimization / early-warning step; the authoritative check
+     * remains [verifyFocusAfterCapture] on the actually stored full-resolution image.
+     *
+     * PERFORMANCE FIX 2026-07-21: this used to call [CameraViewInterface.captureStillImage],
+     * which blocks until the next onSurfaceTextureUpdated callback. That callback is delivered
+     * on the MAIN thread — the very thread this method runs on — so the frame could never
+     * arrive and the call always ran into its full 5000 ms timeout and returned null. Measured
+     * cost: 5 s per camera, 10 s per capture, with the check never actually working. TextureView
+     * .getBitmap() returns the CURRENT surface content synchronously, which is exactly what a
+     * "how sharp is the preview right now" check needs.
      */
     private fun quickPreviewFocusCheck(camera: CameraSelection) {
         val controls = controlPrefs.load(camera)
-        if (controls.referenceSharpnessPreview <= 0.0) return // noch nie kalibriert
+        if (controls.referenceSharpnessPreview <= 0.0) return // never calibrated
         val view = when (camera) {
             CameraSelection.LEFT -> viewL
             CameraSelection.RIGHT -> viewR
         } ?: return
         val bitmap = try {
-            view.captureStillImage()
+            (view as? android.view.TextureView)?.bitmap
         } catch (e: Exception) {
+            Log.w(TAG, "quickPreviewFocusCheck($camera): reading the preview frame failed", e)
             null
         } ?: return
         val measured = try {
@@ -1116,6 +1173,13 @@ class UvcCameraBridge(
             // Synchron VOR jedem weiteren Schritt markieren — das ist der eigentliche Fix.
             setSlotClaimed(slot, true)
             Log.d(TAG, "onConnect: Slot $slot zugewiesen, oeffne Handler")
+
+            // Fuer reopenAtSize() aufheben (siehe savedCtrlBlockL/R-Kommentar) — im Gegensatz
+            // zu pendingCtrlBlockX nie geloescht.
+            when (slot) {
+                CameraSelection.LEFT -> savedCtrlBlockL = ctrlBlock
+                CameraSelection.RIGHT -> savedCtrlBlockR = ctrlBlock
+            }
 
             ensureHandler(slot)
             val handler = handlerFor(slot)

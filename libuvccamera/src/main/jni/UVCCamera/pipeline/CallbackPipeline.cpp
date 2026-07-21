@@ -151,10 +151,30 @@ void CallbackPipeline::do_capture(JNIEnv *env) {
 							goto SKIP;
 						}
 					}
-					jobject buf = env->NewDirectByteBuffer(callback_frame->data, callbackPixelBytes);
-					env->CallVoidMethod(mFrameCallbackObj, iframecallback_fields.onFrame, buf);
-					env->ExceptionClear();
-					env->DeleteLocalRef(buf);
+					// FIX (2026-07-21, reproduced on device: "JNI DETECTED ERROR: jmethodID
+					// was NULL in call to CallVoidMethodV" on repeated setFrameCallback()
+					// during active streaming, e.g. a 21-step focus sweep): the mutex locking
+					// that setFrameCallback() uses when writing mFrameCallbackObj /
+					// iframecallback_fields.onFrame (see above) was missing here — an
+					// unsynchronized read/write data race. The mIsCapturing/capture_sync
+					// quiesce in setFrameCallback() does NOT reliably protect against it:
+					// internal_do_capture()'s outer loop (CaptureBasePipeline.cpp) immediately
+					// sets mIsCapturing back to true and calls do_capture() again WITHOUT
+					// waiting for setFrameCallback() to wake from capture_sync.wait(), so the
+					// fields can be mutated mid-processing. PreviewPipeline::do_capture() (the
+					// analogous class) already locks capture_mutex around the equivalent
+					// section (mCaptureWindow) — the counterpart for mFrameCallbackObj was
+					// simply absent here.
+					capture_mutex.lock();
+					{
+						if (mFrameCallbackObj && iframecallback_fields.onFrame) {
+							jobject buf = env->NewDirectByteBuffer(callback_frame->data, callbackPixelBytes);
+							env->CallVoidMethod(mFrameCallbackObj, iframecallback_fields.onFrame, buf);
+							env->ExceptionClear();
+							env->DeleteLocalRef(buf);
+						}
+					}
+					capture_mutex.unlock();
 				}
 SKIP:
 				recycle_frame(frame);

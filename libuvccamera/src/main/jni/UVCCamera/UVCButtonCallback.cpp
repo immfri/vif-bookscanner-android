@@ -75,11 +75,24 @@ void UVCButtonCallback::uvc_button_callback(int button, int state, void *user_pt
 	UVCButtonCallback *buttonCallback = reinterpret_cast<UVCButtonCallback *>(user_ptr);
 
 	JavaVM *vm = getVM();
-	JNIEnv *env;
-	// attach to JavaVM
-	vm->AttachCurrentThread(&env, NULL);
+	JNIEnv *env = NULL;
+	// FIX (2026-07-21, reproduced on device: SIGABRT "Thread[...,\"CameraThread\"]
+	// attempting to detach while still running code" during handleStartPreview after a
+	// close()+open() cycle): this callback used to Attach/Detach unconditionally. When it
+	// fires on a thread that is ALREADY attached to the JVM — such as the Java CameraThread
+	// driving open/startPreview — AttachCurrentThread is a no-op returning the existing env,
+	// but the following DetachCurrentThread tears down a thread that still has live Java
+	// frames, which ART aborts on. Only detach when we were the ones who attached.
+	const bool alreadyAttached =
+		vm->GetEnv((void **)&env, JNI_VERSION_1_6) == JNI_OK && env != NULL;
+	if (!alreadyAttached && vm->AttachCurrentThread(&env, NULL) != JNI_OK) {
+		LOGW("uvc_button_callback: AttachCurrentThread failed");
+		return;
+	}
 
 	buttonCallback->notifyButtonCallback(env, button, state);
-	
-	vm->DetachCurrentThread();
+
+	if (!alreadyAttached) {
+		vm->DetachCurrentThread();
+	}
 }

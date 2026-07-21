@@ -2,11 +2,20 @@
 
 Android app for a physical dual-camera book scanner (2x USB UVC webcam, e.g. ArduCAM IMX298 AF) — goal: best possible, OCR-ready captures of book pages.
 
+## Why this exists
+
+Large-scale book digitization today is largely dominated by a handful of big players (Google Books and similar), often at inconsistent quality. This project's goal is to give antiquarian bookshops, libraries, archives, and any institution without a big budget a way to build a **high-quality, low-cost book scanner** themselves — the software here is one half of that (the hardware rig is a separate, planned companion project). It is meant to stay free for everyone, forever — see the licensing section below.
+
 Copyright (c) 2026 Immanuel Friedrichsen — see [NOTICE](NOTICE) for the full copyright/license attribution.
 
 This project is a **fork of [saki4510t/UVCCamera](https://github.com/saki4510t/UVCCamera)** (Copyright (c) 2014-2017 saki t_saki@serenegiant.com). The original UVC driver served as a dated but solid base (last upstream activity around 2020) and was modernized and extended with a full app layer for this project.
 
-License: **Apache License, Version 2.0** (see [LICENSE](LICENSE)) — for the entire repository, both original and additions.
+## License (mixed — two licenses, deliberately)
+
+- **`bookscanner-app`** (the actual app — everything built from scratch for this project): **[PolyForm Noncommercial License 1.0.0](bookscanner-app/LICENSE)**. Free and open source for anyone, but **no commercial use** — nobody gets to build a paid product on top of this. This is the deliberate choice reflecting the project's mission (see above).
+- **`libuvccamera`, `usbCameraCommon`, `usbCameraTest0`–`usbCameraTest8`** (inherited from upstream): **[Apache License, Version 2.0](LICENSE)** — unchanged from the original, and legally cannot be restricted further (the original author already granted everyone, including commercial users, an irrevocable Apache 2.0 license to this code).
+
+See [NOTICE](NOTICE) for the full explanation of why this split exists and is legally necessary.
 
 ---
 

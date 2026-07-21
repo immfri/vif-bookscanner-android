@@ -69,6 +69,14 @@ class MainActivity : ComponentActivity() {
                         this@MainActivity, "Kamera-Fehler ($camera): ${error.message}", Toast.LENGTH_LONG
                     ).show()
                 }
+
+                override fun onSharpnessOutOfTolerance(camera: CameraSelection, measured: Double, reference: Double) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Fokus unscharf, bitte pruefen ($camera): Schaerfe $measured (Referenz $reference)",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             }
         )
         viewModel.cameraBridge = cameraBridge

@@ -22,18 +22,6 @@ import de.vif.bookscanner.state.ScannerViewModel
  */
 
 @Composable
-fun CalibrationScreen(viewModel: ScannerViewModel) {
-    PlaceholderScaffold(
-        title = "Kalibrierung",
-        description = "TODO: beide Kameras oeffnen, Belichtung/Weissabgleich angleichen."
-    ) {
-        Button(onClick = { viewModel.start_setup() }) {
-            Text("Weiter zu LOCK")
-        }
-    }
-}
-
-@Composable
 fun LockScreen(viewModel: ScannerViewModel) {
     PlaceholderScaffold(
         title = "Gesperrt (LOCK)",

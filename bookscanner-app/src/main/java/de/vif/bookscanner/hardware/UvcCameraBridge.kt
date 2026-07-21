@@ -1,6 +1,7 @@
 package de.vif.bookscanner.hardware
 
 import android.app.Activity
+import android.graphics.BitmapFactory
 import android.hardware.usb.UsbDevice
 import android.os.Handler
 import android.os.Looper
@@ -21,9 +22,18 @@ import java.io.File
  * (USBMonitor + UVCCameraHandler pro Kamera-Slot), auf den Zwei-Zustaende-Bedarf
  * (Preview 320x240 MJPEG / Capture volle Aufloesung mit Pflicht-Mode-Switch) reduziert.
  *
+ * ERGAENZUNG (Kalibrier-Architektur, 2026-07-21): Automodus (Auto-Fokus/Auto-WB fahren lassen,
+ * dann auslesen+fixieren via [calibrateAuto]) + manueller Modus ([applyManualControls]) fuer den
+ * kompletten UVC-Parametersatz ([UvcControlSet]), persistiert pro Kamera-Slot ([UvcControlPrefs]).
+ * Rekalibrierung erfolgt NICHT nach fester Aufnahmezahl (Recherche fand dafuer keinen belastbaren
+ * Wert), sondern ereignisgesteuert: nach jeder Aufnahme wird die tatsaechliche Schaerfe
+ * gemessen ([SharpnessAnalyzer]) und gegen den bei der Kalibrierung gespeicherten Referenzwert
+ * verglichen ([verifyFocusAfterCapture]).
+ *
  * UNGETESTET: Diese Klasse wurde ohne angeschlossene Kamera geschrieben. Sie kompiliert
  * gegen die echte libuvccamera-API, aber das tatsaechliche Geraete-Verhalten (Attach-
- * Reihenfolge, Mode-Switch-Timing) ist mit echter Hardware zu verifizieren.
+ * Reihenfolge, Mode-Switch-Timing, Auto-Kalibrier-Einschwingzeit) ist mit echter Hardware
+ * zu verifizieren.
  */
 class UvcCameraBridge(
     private val activity: Activity,
@@ -46,6 +56,11 @@ class UvcCameraBridge(
         fun onCameraClosed(camera: CameraSelection)
 
         fun onError(camera: CameraSelection, error: Exception)
+
+        /** Optionaler Hook: Schaerfe nach einer Aufnahme lag ausserhalb des Toleranzbands
+         * gegen den Kalibrier-Referenzwert (siehe [verifyFocusAfterCapture]). Default no-op,
+         * damit bestehende Listener-Implementierungen nicht brechen. */
+        fun onSharpnessOutOfTolerance(camera: CameraSelection, measured: Double, reference: Double) {}
     }
 
     companion object {
@@ -56,9 +71,16 @@ class UvcCameraBridge(
         const val CAPTURE_HEIGHT = 720
 
         private const val CAPTURE_SETTLE_DELAY_MS = 400L
+
+        /** Wartezeit bis der Auto-Fokus/Auto-WB-Regelkreis eingeschwungen ist, bevor der
+         * erreichte Wert ausgelesen und Auto abgeschaltet (fixiert) wird. Ungetestet mit
+         * echter Kamera, konservativ gewaehlt. */
+        private const val AUTO_CALIBRATION_SETTLE_DELAY_MS = 1200L
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val controlPrefs = UvcControlPrefs(activity.applicationContext)
 
     private var usbMonitor: USBMonitor? = null
 
@@ -147,6 +169,7 @@ class UvcCameraBridge(
             handler.open(ctrlBlock)
             mainHandler.post {
                 startPreview(camera)
+                applyManualControls(camera, controlPrefs.load(camera))
                 listener.onCameraOpened(camera)
             }
         } catch (e: Exception) {
@@ -185,7 +208,7 @@ class UvcCameraBridge(
 
     fun isOpened(camera: CameraSelection): Boolean = handlerFor(camera)?.isOpened == true
 
-    /** Startet die Live-Vorschau (320x240 MJPEG) fuer den angegebenen Kamera-Slot. */
+    /** Startet die Live-Vorschau fuer den angegebenen Kamera-Slot. */
     fun startPreview(camera: CameraSelection) {
         val handler = handlerFor(camera) ?: return
         val view = when (camera) {
@@ -214,10 +237,14 @@ class UvcCameraBridge(
     /**
      * Pflicht-Mode-Switch + Capture: schaltet kurz auf volle Sensor-Aufloesung, nimmt genau
      * einen Frame binaer auf (via UVCCameraHandler#captureStill, kein manuelles Decode/Encode
-     * im App-Code) und schaltet danach zurueck auf die 320x240-Vorschau.
+     * im App-Code) und schaltet danach zurueck auf die Vorschau-Aufloesung.
      *
      * USB2-Bandbreite erlaubt keinen simultanen Preview+Capture in voller Aufloesung, deshalb
      * der explizite resize()-Umweg (siehe UVCCameraHandler#resize -> AbstractUVCCameraHandler).
+     *
+     * Nach dem Capture wird die Schaerfe der geschriebenen Datei gegen den Kalibrier-
+     * Referenzwert geprueft (siehe [verifyFocusAfterCapture]) — kein festes N-Aufnahmen-
+     * Intervall (siehe Klassenkommentar), sondern echte Pro-Aufnahme-Verifikation.
      *
      * @param targetFile Zieldatei (Dateiname bereits via BookscanFileNamer gebaut).
      * @param onDone Callback (Main-Thread) nach Abschluss des Mode-Switch-Zyklus.
@@ -255,10 +282,187 @@ class UvcCameraBridge(
                 } catch (e: Exception) {
                     Log.w(TAG, "resize zurueck auf Preview-Aufloesung fehlgeschlagen", e)
                 }
+                applyManualControls(camera, controlPrefs.load(camera))
+                verifyFocusAfterCapture(camera, targetFile)
                 onDone()
             }, CAPTURE_SETTLE_DELAY_MS)
         }, CAPTURE_SETTLE_DELAY_MS)
     }
+
+    /**
+     * Automodus-Kalibrierung: schaltet Auto-Fokus + Auto-Weissabgleich EIN, wartet auf
+     * Einschwingen, liest dann die tatsaechlich erreichten Werte aus und schaltet Auto
+     * wieder AB — der ausgelesene Wert wird explizit erneut gesetzt (fixiert/eingefroren).
+     * Kein Nachlaufen zwischen einzelnen Aufnahmen (Vorgabe: maximale OCR-Qualitaet, ein
+     * "wandernder" Fokus wuerde das sabotieren).
+     *
+     * Nimmt danach zusaetzlich einen Referenz-Still auf (in den App-Cache, wird wieder
+     * geloescht) und misst dessen Schaerfe ([SharpnessAnalyzer]) als Referenzwert fuer die
+     * Pro-Aufnahme-Verifikation ([verifyFocusAfterCapture]). Ergebnis wird persistiert.
+     */
+    fun calibrateAuto(camera: CameraSelection, onResult: (UvcControlSet) -> Unit) {
+        val handler = handlerFor(camera)
+        if (handler == null || !handler.isOpened) {
+            listener.onError(camera, IllegalStateException("Kamera $camera nicht geoeffnet, keine Auto-Kalibrierung moeglich"))
+            return
+        }
+        try {
+            handler.setAutoFocus(true)
+            handler.setAutoWhiteBalance(true)
+        } catch (e: Exception) {
+            Log.w(TAG, "calibrateAuto($camera): Auto-Modi einschalten fehlgeschlagen", e)
+        }
+
+        mainHandler.postDelayed({
+            val fixed = try {
+                val fixedFocus = handler.getValue(UVCCamera.CTRL_FOCUS_ABS)
+                val fixedWb = handler.getValue(UVCCamera.PU_WB_TEMP)
+                handler.setAutoFocus(false)
+                handler.setAutoWhiteBalance(false)
+                // Ausgelesenen Wert explizit erneut setzen (fixieren) — nicht nur Auto
+                // abschalten, da der Regelkreis sonst beim letzten internen Sollwert bleiben
+                // koennte statt beim zuletzt ausgelesenen (Sicherheitsnetz, siehe Arducam-Fund
+                // zu Fokus-Reset bei Reconnect: expliziter Re-Apply ist der robuste Weg).
+                handler.setValue(UVCCamera.CTRL_FOCUS_ABS, fixedFocus)
+                handler.setValue(UVCCamera.PU_WB_TEMP, fixedWb)
+                getCurrentControls(camera).copy(
+                    focus = fixedFocus,
+                    focusAuto = false,
+                    whiteBalance = fixedWb,
+                    whiteBalanceAuto = false
+                )
+            } catch (e: Exception) {
+                listener.onError(camera, e)
+                null
+            } ?: return@postDelayed
+
+            // Referenz-Still fuer die Schaerfe-Baseline aufnehmen (App-Cache, temporaer).
+            val refFile = File(activity.cacheDir, "calibration_ref_${camera}_${System.currentTimeMillis()}.jpg")
+            try {
+                handler.captureStill(refFile.absolutePath)
+            } catch (e: Exception) {
+                Log.w(TAG, "calibrateAuto($camera): Referenz-Still fehlgeschlagen, referenceSharpness bleibt 0.0", e)
+            }
+            mainHandler.postDelayed({
+                val referenceSharpness = measureSharpness(refFile) ?: 0.0
+                refFile.delete()
+                val result = fixed.copy(referenceSharpness = referenceSharpness)
+                controlPrefs.save(camera, result)
+                onResult(result)
+            }, CAPTURE_SETTLE_DELAY_MS)
+        }, AUTO_CALIBRATION_SETTLE_DELAY_MS)
+    }
+
+    /** Schreibt einen kompletten manuellen Parametersatz auf den Treiber (kein Persist hier —
+     * Aufrufer entscheidet, ob/wann gespeichert wird, siehe [saveControlSet]). */
+    fun applyManualControls(camera: CameraSelection, controls: UvcControlSet) {
+        val handler = handlerFor(camera) ?: return
+        if (!handler.isOpened) return
+        try {
+            handler.setAutoFocus(controls.focusAuto)
+            if (!controls.focusAuto) handler.setValue(UVCCamera.CTRL_FOCUS_ABS, controls.focus)
+            handler.setAutoWhiteBalance(controls.whiteBalanceAuto)
+            if (!controls.whiteBalanceAuto) handler.setValue(UVCCamera.PU_WB_TEMP, controls.whiteBalance)
+            handler.setValue(UVCCamera.PU_BRIGHTNESS, controls.brightness)
+            handler.setValue(UVCCamera.PU_CONTRAST, controls.contrast)
+            handler.setValue(UVCCamera.PU_SHARPNESS, controls.sharpness)
+            handler.setValue(UVCCamera.PU_GAIN, controls.gain)
+            handler.setValue(UVCCamera.PU_GAMMA, controls.gamma)
+            handler.setValue(UVCCamera.PU_SATURATION, controls.saturation)
+            handler.setValue(UVCCamera.PU_HUE, controls.hue)
+            handler.setValue(UVCCamera.CTRL_ZOOM_ABS, controls.zoom)
+        } catch (e: Exception) {
+            Log.w(TAG, "applyManualControls($camera) teilweise fehlgeschlagen", e)
+        }
+    }
+
+    /** Liest den aktuell am Treiber stehenden Parametersatz aus (fuer Slider-Initialwerte/UI). */
+    fun getCurrentControls(camera: CameraSelection): UvcControlSet {
+        val handler = handlerFor(camera)
+        if (handler == null || !handler.isOpened) return controlPrefs.load(camera)
+        return try {
+            controlPrefs.load(camera).copy(
+                focus = handler.getValue(UVCCamera.CTRL_FOCUS_ABS),
+                focusAuto = handler.getAutoFocus(),
+                brightness = handler.getValue(UVCCamera.PU_BRIGHTNESS),
+                contrast = handler.getValue(UVCCamera.PU_CONTRAST),
+                sharpness = handler.getValue(UVCCamera.PU_SHARPNESS),
+                gain = handler.getValue(UVCCamera.PU_GAIN),
+                gamma = handler.getValue(UVCCamera.PU_GAMMA),
+                saturation = handler.getValue(UVCCamera.PU_SATURATION),
+                hue = handler.getValue(UVCCamera.PU_HUE),
+                whiteBalance = handler.getValue(UVCCamera.PU_WB_TEMP),
+                whiteBalanceAuto = handler.getAutoWhiteBalance(),
+                zoom = handler.getValue(UVCCamera.CTRL_ZOOM_ABS)
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "getCurrentControls($camera) fehlgeschlagen, gespeicherter Stand zurueckgegeben", e)
+            controlPrefs.load(camera)
+        }
+    }
+
+    /** Persistiert [controls] fuer den Slot [camera] (slot-basiert, siehe [UvcControlPrefs]). */
+    fun saveControlSet(camera: CameraSelection, controls: UvcControlSet) {
+        controlPrefs.save(camera, controls)
+    }
+
+    /** Geladener/gespeicherter Parametersatz fuer [camera] (Defaults falls noch nie
+     * kalibriert/gespeichert wurde). */
+    fun loadControlSet(camera: CameraSelection): UvcControlSet = controlPrefs.load(camera)
+
+    /**
+     * Pro-Aufnahme-Schaerfe-Check (ersetzt festes N-Aufnahmen-Rekalibrierungs-Intervall, siehe
+     * Klassenkommentar): misst die Laplace-Varianz von [capturedFile] und vergleicht sie gegen
+     * den bei [calibrateAuto] gespeicherten Referenzwert. Bei Unterschreitung des Toleranzbands
+     * (siehe [UvcControlPrefs.getSharpnessToleranceBandPercent]) wird optional automatisch der
+     * fixierte Fokuswert erneut geschrieben (Auto-Retry, siehe [UvcControlPrefs.getAutoRetryEnabled])
+     * und in jedem Fall [Listener.onSharpnessOutOfTolerance] ausgeloest.
+     */
+    private fun verifyFocusAfterCapture(camera: CameraSelection, capturedFile: File) {
+        val controls = controlPrefs.load(camera)
+        if (controls.referenceSharpness <= 0.0) return // noch nie kalibriert, nichts zu vergleichen
+
+        val measured = measureSharpness(capturedFile) ?: return
+        val toleranceBand = controlPrefs.getSharpnessToleranceBandPercent()
+        if (SharpnessAnalyzer.isWithinTolerance(measured, controls.referenceSharpness, toleranceBand)) {
+            return
+        }
+
+        Log.w(TAG, "verifyFocusAfterCapture($camera): Schaerfe $measured ausserhalb Toleranz (Referenz ${controls.referenceSharpness}, Band $toleranceBand%)")
+        if (controlPrefs.getAutoRetryEnabled() && !controls.focusAuto) {
+            // Fokus einfach erneut fixiert schreiben (Arducam-Fund: Fokuswert kann bei
+            // Erschuetterung/Reconnect verrutschen, expliziter Re-Apply ist der robuste Weg).
+            val handler = handlerFor(camera)
+            try {
+                handler?.setValue(UVCCamera.CTRL_FOCUS_ABS, controls.focus)
+            } catch (e: Exception) {
+                Log.w(TAG, "verifyFocusAfterCapture($camera): Auto-Retry-Re-Apply fehlgeschlagen", e)
+            }
+        }
+        mainHandler.post { listener.onSharpnessOutOfTolerance(camera, measured, controls.referenceSharpness) }
+    }
+
+    private fun measureSharpness(file: File): Double? {
+        if (!file.exists()) return null
+        val bitmap = try {
+            BitmapFactory.decodeFile(file.absolutePath)
+        } catch (e: Exception) {
+            null
+        } ?: return null
+        return try {
+            SharpnessAnalyzer.laplacianVariance(bitmap)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    fun getSharpnessToleranceBandPercent(): Int = controlPrefs.getSharpnessToleranceBandPercent()
+
+    fun setSharpnessToleranceBandPercent(value: Int) = controlPrefs.setSharpnessToleranceBandPercent(value)
+
+    fun getAutoRetryEnabled(): Boolean = controlPrefs.getAutoRetryEnabled()
+
+    fun setAutoRetryEnabled(value: Boolean) = controlPrefs.setAutoRetryEnabled(value)
 
     private val deviceConnectListener = object : OnDeviceConnectListener {
         override fun onAttach(device: UsbDevice) {
@@ -311,8 +515,14 @@ class UvcCameraBridge(
                 listener.onError(slot, e)
                 return
             }
+
             mainHandler.post {
                 startPreview(slot)
+                // Gespeicherte Einstellungen dieses Slots (falls schon einmal kalibriert/
+                // gespeichert) sofort erneut auf den Treiber schreiben — siehe Arducam-
+                // Recherche (Fokuswert geht bei USB-Reconnect verloren, muss aktiv neu
+                // gesendet werden).
+                applyManualControls(slot, controlPrefs.load(slot))
                 listener.onCameraOpened(slot)
             }
         }

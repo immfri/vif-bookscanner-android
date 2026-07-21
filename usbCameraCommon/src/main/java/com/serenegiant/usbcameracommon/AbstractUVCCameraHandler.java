@@ -245,15 +245,43 @@ abstract class AbstractUVCCameraHandler extends Handler {
 		return thread != null && thread.mUVCCamera != null && thread.mUVCCamera.checkSupportFlag(flag);
 	}
 
-	public int getValue(final int flag) {
+	/**
+	 * Liefert die aktuell verbundene {@link UVCCamera}-Instanz oder null, falls keine Kamera
+	 * offen ist. ERGAENZUNG (vif-bookscanner, 2026-07-21): fuer die generische UVC-Settings-
+	 * Architektur wird direkter Zugriff auf die volle Control-API gebraucht (Auto-Modi-Umschaltung
+	 * + Kalibrier-Workflow "auto fahren -> auslesen -> Auto abschalten -> Wert fixieren"), nicht
+	 * nur die auf Brightness/Contrast beschraenkten getValue/setValue-Flag-Methoden unten.
+	 */
+	public UVCCamera getCamera() {
 		checkReleased();
 		final CameraThread thread = mWeakThread.get();
-		final UVCCamera camera = thread != null ? thread.mUVCCamera : null;
+		return thread != null ? thread.mUVCCamera : null;
+	}
+
+	public int getValue(final int flag) {
+		checkReleased();
+		final UVCCamera camera = getCamera();
 		if (camera != null) {
 			if (flag == UVCCamera.PU_BRIGHTNESS) {
 				return camera.getBrightness();
 			} else if (flag == UVCCamera.PU_CONTRAST) {
 				return camera.getContrast();
+			} else if (flag == UVCCamera.PU_SHARPNESS) {
+				return camera.getSharpness();
+			} else if (flag == UVCCamera.PU_GAIN) {
+				return camera.getGain();
+			} else if (flag == UVCCamera.PU_GAMMA) {
+				return camera.getGamma();
+			} else if (flag == UVCCamera.PU_SATURATION) {
+				return camera.getSaturation();
+			} else if (flag == UVCCamera.PU_HUE) {
+				return camera.getHue();
+			} else if (flag == UVCCamera.PU_WB_TEMP) {
+				return camera.getWhiteBlance();
+			} else if (flag == UVCCamera.CTRL_FOCUS_ABS) {
+				return camera.getFocus();
+			} else if (flag == UVCCamera.CTRL_ZOOM_ABS) {
+				return camera.getZoom();
 			}
 		}
 		throw new IllegalStateException();
@@ -261,8 +289,7 @@ abstract class AbstractUVCCameraHandler extends Handler {
 
 	public int setValue(final int flag, final int value) {
 		checkReleased();
-		final CameraThread thread = mWeakThread.get();
-		final UVCCamera camera = thread != null ? thread.mUVCCamera : null;
+		final UVCCamera camera = getCamera();
 		if (camera != null) {
 			if (flag == UVCCamera.PU_BRIGHTNESS) {
 				camera.setBrightness(value);
@@ -270,6 +297,30 @@ abstract class AbstractUVCCameraHandler extends Handler {
 			} else if (flag == UVCCamera.PU_CONTRAST) {
 				camera.setContrast(value);
 				return camera.getContrast();
+			} else if (flag == UVCCamera.PU_SHARPNESS) {
+				camera.setSharpness(value);
+				return camera.getSharpness();
+			} else if (flag == UVCCamera.PU_GAIN) {
+				camera.setGain(value);
+				return camera.getGain();
+			} else if (flag == UVCCamera.PU_GAMMA) {
+				camera.setGamma(value);
+				return camera.getGamma();
+			} else if (flag == UVCCamera.PU_SATURATION) {
+				camera.setSaturation(value);
+				return camera.getSaturation();
+			} else if (flag == UVCCamera.PU_HUE) {
+				camera.setHue(value);
+				return camera.getHue();
+			} else if (flag == UVCCamera.PU_WB_TEMP) {
+				camera.setWhiteBlance(value);
+				return camera.getWhiteBlance();
+			} else if (flag == UVCCamera.CTRL_FOCUS_ABS) {
+				camera.setFocus(value);
+				return camera.getFocus();
+			} else if (flag == UVCCamera.CTRL_ZOOM_ABS) {
+				camera.setZoom(value);
+				return camera.getZoom();
 			}
 		}
 		throw new IllegalStateException();
@@ -277,8 +328,7 @@ abstract class AbstractUVCCameraHandler extends Handler {
 
 	public int resetValue(final int flag) {
 		checkReleased();
-		final CameraThread thread = mWeakThread.get();
-		final UVCCamera camera = thread != null ? thread.mUVCCamera : null;
+		final UVCCamera camera = getCamera();
 		if (camera != null) {
 			if (flag == UVCCamera.PU_BRIGHTNESS) {
 				camera.resetBrightness();
@@ -286,9 +336,62 @@ abstract class AbstractUVCCameraHandler extends Handler {
 			} else if (flag == UVCCamera.PU_CONTRAST) {
 				camera.resetContrast();
 				return camera.getContrast();
+			} else if (flag == UVCCamera.PU_SHARPNESS) {
+				camera.resetSharpness();
+				return camera.getSharpness();
+			} else if (flag == UVCCamera.PU_GAIN) {
+				camera.resetGain();
+				return camera.getGain();
+			} else if (flag == UVCCamera.PU_GAMMA) {
+				camera.resetGamma();
+				return camera.getGamma();
+			} else if (flag == UVCCamera.PU_SATURATION) {
+				camera.resetSaturation();
+				return camera.getSaturation();
+			} else if (flag == UVCCamera.PU_HUE) {
+				camera.resetHue();
+				return camera.getHue();
+			} else if (flag == UVCCamera.PU_WB_TEMP) {
+				camera.resetWhiteBlance();
+				return camera.getWhiteBlance();
+			} else if (flag == UVCCamera.CTRL_FOCUS_ABS) {
+				camera.resetFocus();
+				return camera.getFocus();
+			} else if (flag == UVCCamera.CTRL_ZOOM_ABS) {
+				camera.resetZoom();
+				return camera.getZoom();
 			}
 		}
 		throw new IllegalStateException();
+	}
+
+	/**
+	 * Setzt/liest den Autofokus-Modus. ERGAENZUNG fuer den Kalibrier-Workflow: Automodus
+	 * schaltet Auto-Fokus/Auto-WB EIN, wartet auf Einschwingen, liest dann den erreichten
+	 * Wert aus und schaltet Auto wieder AUS (fixiert/eingefroren, kein Drift zwischen Captures).
+	 */
+	public void setAutoFocus(final boolean autoFocus) {
+		checkReleased();
+		final UVCCamera camera = getCamera();
+		if (camera != null) camera.setAutoFocus(autoFocus);
+	}
+
+	public boolean getAutoFocus() {
+		checkReleased();
+		final UVCCamera camera = getCamera();
+		return camera != null && camera.getAutoFocus();
+	}
+
+	public void setAutoWhiteBalance(final boolean autoWhiteBalance) {
+		checkReleased();
+		final UVCCamera camera = getCamera();
+		if (camera != null) camera.setAutoWhiteBlance(autoWhiteBalance);
+	}
+
+	public boolean getAutoWhiteBalance() {
+		checkReleased();
+		final UVCCamera camera = getCamera();
+		return camera != null && camera.getAutoWhiteBlance();
 	}
 
 	@Override

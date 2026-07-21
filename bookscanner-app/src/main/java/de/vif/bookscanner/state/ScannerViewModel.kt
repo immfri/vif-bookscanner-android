@@ -1,15 +1,21 @@
 package de.vif.bookscanner.state
 
 import android.app.Application
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import de.vif.bookscanner.hardware.UvcCameraBridge
+import de.vif.bookscanner.hardware.UvcControlSet
 import de.vif.bookscanner.storage.ScanStorageRepository
 import de.vif.bookscanner.util.BookscanFileNamer
 import java.io.File
+
+/** Auto- oder manueller Kalibrier-Modus (siehe [CalibrationMode] und CalibrationScreen). */
+enum class CalibrationMode { AUTO, MANUAL }
 
 /**
  * Zentrales ViewModel der Buchscanner-App.
@@ -48,12 +54,130 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     var lastCapturedFile by mutableStateOf<File?>(null)
         private set
 
+    // --- Kalibrier-Architektur (Auto/Manuell, siehe CalibrationScreen) ---
+
+    var calibrationMode by mutableStateOf(CalibrationMode.AUTO)
+        private set
+
+    /** Aktueller Parametersatz der aktiven Kamera, wie er im manuellen Modus per Slider
+     * angezeigt/veraendert wird. Wird beim Betreten von CALIBRATION/SETUP aus der Bridge
+     * (Treiber-Ist-Stand bzw. gespeicherter Stand) nachgeladen. */
+    var currentControls by mutableStateOf(UvcControlSet())
+        private set
+
+    var calibrationInProgress by mutableStateOf(false)
+        private set
+
+    // --- Automatisierter Test-Capture-Loop (Debug-Modus, siehe Plan Punkt 5) ---
+
+    var testLoopRunning by mutableStateOf(false)
+        private set
+
+    var testLoopCurrentIndex by mutableStateOf(0)
+        private set
+
+    var testLoopTotalCount by mutableStateOf(20)
+        private set
+
+    var testLoopIntervalMs by mutableStateOf(4000L)
+        private set
+
+    private val testLoopHandler = Handler(Looper.getMainLooper())
+
     /** Startet die Kalibrierung, danach automatisch LOCK (Vorgabe State-Machine). */
     fun start_calibration() {
         state = ScannerState.CALIBRATION
         // Kameras oeffnen sich automatisch ueber UvcCameraBridge.onConnect (USBMonitor-Callback),
-        // sobald sie am Geraet angeschlossen werden. Belichtung/Weissabgleich-Angleichung ist
-        // ueber die UVCCamera-Value-APIs (setValue/getValue) moeglich, aber noch nicht verdrahtet.
+        // sobald sie am Geraet angeschlossen werden.
+        refreshCurrentControls()
+    }
+
+    fun refreshCurrentControls() {
+        cameraBridge?.let { bridge ->
+            currentControls = if (bridge.isOpened(activeCamera)) {
+                bridge.getCurrentControls(activeCamera)
+            } else {
+                bridge.loadControlSet(activeCamera)
+            }
+        }
+    }
+
+    fun set_calibration_mode(mode: CalibrationMode) {
+        calibrationMode = mode
+        if (mode == CalibrationMode.MANUAL) refreshCurrentControls()
+    }
+
+    /** Automodus-Knopf: Auto-Fokus/Auto-WB fahren lassen, dann auslesen+fixieren
+     * (siehe [UvcCameraBridge.calibrateAuto]) — kein Nachlaufen zwischen Aufnahmen. */
+    fun run_auto_calibration() {
+        val bridge = cameraBridge ?: return
+        if (!bridge.isOpened(activeCamera)) {
+            Log.w(TAG, "run_auto_calibration: Kamera $activeCamera nicht verbunden")
+            return
+        }
+        calibrationInProgress = true
+        bridge.calibrateAuto(activeCamera) { result ->
+            currentControls = result
+            calibrationInProgress = false
+        }
+    }
+
+    /** Manueller Modus: einzelner Slider-Wert geaendert -> sofort live auf den Treiber
+     * schreiben (Vorgabe: sofortige Anzeige im Live-Feed) + persistieren. */
+    fun update_manual_control(updated: UvcControlSet) {
+        currentControls = updated
+        val bridge = cameraBridge ?: return
+        bridge.applyManualControls(activeCamera, updated)
+        bridge.saveControlSet(activeCamera, updated)
+    }
+
+    /** Startet den automatisierten Test-Capture-Loop (Debug-Modus, NICHT der normale Scan-Flow):
+     * nimmt [count] Aufnahmen im Abstand [intervalMs] auf, Projektname fix "autofocus-drift-test",
+     * fortlaufende Seitenzahl — fuer die empirische Fokus-Drift-Analyse (siehe Plan). */
+    fun start_test_capture_loop(count: Int, intervalMs: Long) {
+        if (testLoopRunning) return
+        val bridge = cameraBridge
+        if (bridge == null || !bridge.isOpened(activeCamera)) {
+            Log.w(TAG, "start_test_capture_loop: Kamera $activeCamera nicht verbunden")
+            return
+        }
+        testLoopTotalCount = count
+        testLoopIntervalMs = intervalMs
+        testLoopCurrentIndex = 0
+        testLoopRunning = true
+        scheduleNextTestCapture()
+    }
+
+    fun stop_test_capture_loop() {
+        testLoopRunning = false
+        testLoopHandler.removeCallbacksAndMessages(null)
+    }
+
+    private fun scheduleNextTestCapture() {
+        if (!testLoopRunning) return
+        if (testLoopCurrentIndex >= testLoopTotalCount) {
+            testLoopRunning = false
+            return
+        }
+        val bridge = cameraBridge
+        if (bridge == null || !bridge.isOpened(activeCamera)) {
+            Log.w(TAG, "scheduleNextTestCapture: Kamera $activeCamera getrennt, Loop wird abgebrochen")
+            testLoopRunning = false
+            return
+        }
+        val fileName = BookscanFileNamer.buildFileName(
+            projectName = TEST_LOOP_PROJECT_NAME,
+            pageNumber = testLoopCurrentIndex + 1,
+            camera = activeCamera
+        )
+        val targetFile = storageRepository.reserveCaptureFile(fileName)
+        bridge.captureFullResolutionThenReturnToPreview(activeCamera, targetFile) {
+            storageRepository.publishCapturedFile(targetFile)
+            testLoopCurrentIndex += 1
+            if (testLoopRunning) {
+                testLoopHandler.postDelayed({ scheduleNextTestCapture() }, testLoopIntervalMs)
+            }
+        }
     }
 
     /** Loest den Wechsel PREVIEW -> CAPTURE -> zurueck PREVIEW aus (1 Frame, volle Aufloesung). */
@@ -103,6 +227,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 bridge.startPreview(activeCamera)
             }
         }
+        refreshCurrentControls()
     }
 
     /** Overlay-Control "Rotate 180°". */
@@ -113,6 +238,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     /** Overlay-Control "Recalibrate". */
     fun start_setup() {
         state = ScannerState.SETUP
+        refreshCurrentControls()
     }
 
     /** Verlaesst SETUP zurueck in den PREVIEW-Zustand. */
@@ -126,5 +252,8 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
 
     companion object {
         private const val TAG = "ScannerViewModel"
+
+        /** Fixer Projektname fuer den Test-Capture-Loop (Debug-Modus, siehe Plan Punkt 5). */
+        const val TEST_LOOP_PROJECT_NAME = "autofocus-drift-test"
     }
 }

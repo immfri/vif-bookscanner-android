@@ -10,11 +10,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -42,6 +45,11 @@ import de.vif.bookscanner.state.ScannerViewModel
 @Composable
 fun SettingsScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
     var dropdownExpanded by remember { mutableStateOf(false) }
+    var showTestLoopDialog by remember { mutableStateOf(false) }
+
+    if (showTestLoopDialog) {
+        TestCaptureLoopDialog(viewModel = viewModel, onDismiss = { showTestLoopDialog = false })
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
 
@@ -94,8 +102,18 @@ fun SettingsScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
                 OutlinedButton(onClick = { viewModel.set_orientation() }) {
                     Text("Rotate 180°")
                 }
-                // TODO: weitere Kamera-Parameter (Belichtung, Weissabgleich, Fokus) ergaenzen,
-                // sobald der Treiber entsprechende Steuer-APIs bereitstellt.
+                // Vollstaendiger UVC-Parametersatz (Auto/Manuell) lebt im eigenen
+                // CalibrationScreen (State CALIBRATION, "Recalibrate"-Button in PREVIEW).
+                OutlinedButton(onClick = { viewModel.start_calibration() }) {
+                    Text("Kalibrierung öffnen")
+                }
+                // Eigener Debug-Einstiegspunkt (NICHT der normale Scan-Flow, siehe Plan Punkt 5):
+                // automatisierte Test-Aufnahmeserie zur empirischen Fokus-Drift-Analyse.
+                OutlinedButton(onClick = { showTestLoopDialog = true }) {
+                    Text("Test: Autofokus-Drift-Serie")
+                }
+
+                SharpnessCheckSettings(cameraBridge)
             }
 
             LiveFeedPinchZoom(
@@ -166,3 +184,38 @@ private fun CameraSelection.label(): String = when (this) {
     CameraSelection.LEFT -> "Links (L)"
     CameraSelection.RIGHT -> "Rechts (R)"
 }
+
+/**
+ * Einstellungen fuer den Pro-Aufnahme-Schaerfe-Check (KORREKTUR 2026-07-21, ersetzt das
+ * urspruenglich geplante feste "alle N Aufnahmen neu kalibrieren"-Feld): Toleranzband in
+ * Prozent gegen den Kalibrier-Referenzwert + Umschalter fuer automatischen Retry.
+ */
+@Composable
+private fun SharpnessCheckSettings(cameraBridge: UvcCameraBridge) {
+    var toleranceText by remember { mutableStateOf(cameraBridge.getSharpnessToleranceBandPercent().toString()) }
+    var autoRetry by remember { mutableStateOf(cameraBridge.getAutoRetryEnabled()) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Schärfe-Check (pro Aufnahme)", style = MaterialTheme.typography.titleSmall)
+        OutlinedTextField(
+            value = toleranceText,
+            onValueChange = { input ->
+                toleranceText = input.filter { it.isDigit() }
+                toleranceText.toIntOrNull()?.let { cameraBridge.setSharpnessToleranceBandPercent(it) }
+            },
+            label = { Text("Toleranzband (%)") }
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = autoRetry,
+                onCheckedChange = {
+                    autoRetry = it
+                    cameraBridge.setAutoRetryEnabled(it)
+                }
+            )
+            Text("Automatischer Retry bei zu geringer Schärfe")
+        }
+    }
+}
+
+// TestCaptureLoopDialog lebt in einer eigenen Datei: ui/TestCaptureLoopDialog.kt

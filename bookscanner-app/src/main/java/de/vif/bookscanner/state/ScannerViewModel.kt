@@ -201,15 +201,30 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
 
     /**
      * Loest die DOPPELSEITEN-Aufnahme aus (Kern-Workflow des Buchscanners): nimmt
-     * NACHEINANDER BEIDE verbundenen Kameras (LEFT dann RIGHT) in voller Aufloesung auf —
-     * eine Blaetterung = eine linke + eine rechte Buchseite. Sequenziell statt parallel,
-     * weil sich beide Kameras die USB2-Bandbreite teilen (bandwidthFactor 0.5) und ein
-     * gleichzeitiger Voll-Aufloesungs-Mode-Switch beider Streams die Bandbreite sprengt.
+     * PARALLEL BEIDE verbundenen Kameras (LEFT + RIGHT) in voller Aufloesung auf —
+     * eine Blaetterung = eine linke + eine rechte Buchseite.
+     *
+     * PARALLEL statt sequenziell (User-Vorgabe, 2026-07-21): jede Kamera laeuft ohnehin auf
+     * ihrem EIGENEN CameraThread (UVCCameraHandler.createHandler spawnt je einen), und der
+     * dominante Zeitanteil pro Aufnahme sind WARTEZEITEN (Mode-Switch-Settle ~2s + Warten
+     * auf den ersten Voll-Aufloesungs-Frame ~1,9s), nicht die Datenuebertragung — diese
+     * Wartezeiten ueberlappen sich bei paralleler Ausfuehrung fast vollstaendig (~halbierte
+     * Gesamtzeit pro Doppelseite). Bandbreite: beide Handler sind mit bandwidthFactor 0.5
+     * konfiguriert, reservieren also je die halbe USB2-Bandbreite — ein gleichzeitiger
+     * Betrieb ist damit von vornherein eingeplant. Hinweis USB-Topologie: auch an einem
+     * USB3-Hub teilen sich USB2-Geraete upstream EINEN gemeinsamen 480-Mbit/s-USB2-Baum
+     * (USB2-Signale laufen nicht ueber die USB3-Lanes) — der Gewinn kommt aus der
+     * Wartezeit-Ueberlappung, nicht aus doppelter Bandbreite.
      *
      * Ist nur EINE Kamera verbunden (z.B. Einzelkamera-Betrieb/Test), wird nur diese
      * aufgenommen — kein Fehler. Die Seitenzahl wird EINMAL pro Doppelseiten-Aufnahme
      * inkrementiert (beide Dateien tragen dieselbe Seitennummer, unterschieden per _L/_R —
      * Namensschema {Projekt}_S{Seite:04d}_{L|R}.jpg).
+     *
+     * Thread-Sicherheit: die Completion-Callbacks von captureFullResolutionThenReturnToPreview
+     * werden via mainHandler auf dem Main-Thread ausgeliefert (siehe UvcCameraBridge) —
+     * capturedThisRound/completedCount brauchen deshalb kein Lock, die Callbacks laufen
+     * seriell auf dem Main-Looper.
      */
     fun start_capture() {
         if (state != ScannerState.PREVIEW) return
@@ -228,17 +243,10 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         state = ScannerState.CAPTURE
         captureInProgress = true
         val capturedThisRound = mutableListOf<File>()
+        var completedCount = 0
+        val totalCount = connectedCameras.size
 
-        fun captureAt(index: Int) {
-            if (index >= connectedCameras.size) {
-                captureInProgress = false
-                lastCapturedFiles = capturedThisRound.toList()
-                lastCapturedFile = capturedThisRound.lastOrNull()
-                pageNumber += 1
-                state = ScannerState.RECHECK
-                return
-            }
-            val camera = connectedCameras[index]
+        connectedCameras.forEach { camera ->
             val fileName = BookscanFileNamer.buildFileName(
                 projectName = projectName,
                 pageNumber = pageNumber,
@@ -248,10 +256,18 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             bridge.captureFullResolutionThenReturnToPreview(camera, targetFile) {
                 storageRepository.publishCapturedFile(targetFile)
                 capturedThisRound.add(targetFile)
-                captureAt(index + 1)
+                completedCount += 1
+                if (completedCount >= totalCount) {
+                    captureInProgress = false
+                    // Stabile L-vor-R-Reihenfolge fuer die Anzeige, unabhaengig davon,
+                    // welche Kamera zuerst fertig wurde.
+                    lastCapturedFiles = capturedThisRound.sortedBy { it.name }
+                    lastCapturedFile = lastCapturedFiles.lastOrNull()
+                    pageNumber += 1
+                    state = ScannerState.RECHECK
+                }
             }
         }
-        captureAt(0)
     }
 
     /** Nutzer bestaetigt die aufgenommene Seite in RECHECK -> zurueck PREVIEW fuer naechste Seite. */

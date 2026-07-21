@@ -1,5 +1,6 @@
 package de.vif.bookscanner.ui
 
+import android.graphics.RectF
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -30,6 +31,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import de.vif.bookscanner.hardware.UvcCameraBridge
 import de.vif.bookscanner.state.CameraSelection
@@ -143,6 +146,14 @@ private fun LiveFeedPinchZoom(
     var scale by remember { mutableStateOf(defaultZoom) }
     var offsetX by remember { mutableStateOf(0f) }
     var offsetY by remember { mutableStateOf(0f) }
+    var boxSizePx by remember { mutableStateOf(IntSize.Zero) }
+
+    fun publishFocusRegion() {
+        cameraBridge.setFocusRegion(
+            camera,
+            approximateFocusRegionCrop(boxSizePx, scale, offsetX, offsetY)
+        )
+    }
 
     Box(
         modifier = modifier
@@ -152,11 +163,15 @@ private fun LiveFeedPinchZoom(
             // und Kamera-Auswahl-Leiste links (live beobachtet: 5x-Zoom fuellte den kompletten
             // Screen statt nur die rechte Haelfte des Split-Layouts).
             .clipToBounds()
+            .onSizeChanged { boxSizePx = it }
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, zoom, _ ->
                     scale = (scale * zoom).coerceIn(1f, 10f)
                     offsetX += pan.x
                     offsetY += pan.y
+                    // Regionsbezogene Schaerfemessung (Punkt 2): jede Zoom/Pan-Geste aktualisiert
+                    // den Fokus-Bildausschnitt fuer Sweep + Pro-Aufnahme-Checks sofort mit.
+                    publishFocusRegion()
                 }
             },
         contentAlignment = Alignment.Center
@@ -178,6 +193,46 @@ private fun LiveFeedPinchZoom(
             color = Color.White
         )
     }
+}
+
+/**
+ * Naeherungsweise Umrechnung des Pinch-Zoom/Pan-Zustands des Live-Feeds (Compose-Pixel-
+ * Transform auf der TextureView) in einen FRAKTIONALEN Bildausschnitt (0f..1f je Achse,
+ * siehe [UvcCameraBridge.setFocusRegion]) fuer die regionsbezogene Schaerfemessung/den
+ * Fokus-Sweep (Punkt 2). Fraktional statt Pixel-Rect, weil derselbe Ausschnitt sowohl auf
+ * die Preview- als auch auf die Capture-Aufloesung angewendet werden muss (Punkt 3,
+ * zweistufige Messung) — [UvcCameraBridge] rechnet ihn pro Messung auf die tatsaechliche
+ * Bitmap-Groesse um.
+ *
+ * ANNAHME/VEREINFACHUNG (dokumentiert wie vom Auftrag gefordert, da keine exakte 1:1-Umrechnung
+ * ohne echtes Geraet moeglich ist): die TextureView zeigt den Kamera-Stream verzerrungsfrei und
+ * ohne zusaetzliches Letterboxing durch die zugrundeliegende AspectRatio-View — das
+ * Sichtfenster (boxSizePx) entspricht direkt dem sichtbaren Bruchteil des Kamerabilds.
+ * scale=1 => volles Bild sichtbar, scale=5 (Default-Zoom) => 1/5 der Breite/Hoehe sichtbar,
+ * zentriert auf die per Pan verschobene Bildmitte. Falls die reale AspectRatio-View tatsaechlich
+ * Letterboxing/Cropping macht (abhaengig vom Seitenverhaeltnis des Kamerastreams vs. Box), ist
+ * das Ergebnis nur eine Naeherung — fuer den Zweck (Sweep/Check auf "ungefaehr den betrachteten
+ * Bereich" statt Vollbild) ausreichend, siehe Auftrag ("kein Overengineering").
+ */
+private fun approximateFocusRegionCrop(
+    boxSizePx: IntSize,
+    scale: Float,
+    offsetX: Float,
+    offsetY: Float
+): RectF? {
+    if (boxSizePx.width <= 0 || boxSizePx.height <= 0 || scale <= 1f) return null
+
+    val visibleFraction = (1f / scale).coerceIn(0.01f, 1f)
+
+    // offsetX/offsetY sind Bildschirm-Pixel-Translation der BEREITS skalierten Vorschau ->
+    // zurueck auf unskalierte Box-Pixel-Verschiebung rechnen, dann als Bruchteil der Box.
+    val centerFracX = (0.5f - (offsetX / scale) / boxSizePx.width).coerceIn(visibleFraction / 2f, 1f - visibleFraction / 2f)
+    val centerFracY = (0.5f - (offsetY / scale) / boxSizePx.height).coerceIn(visibleFraction / 2f, 1f - visibleFraction / 2f)
+
+    val left = (centerFracX - visibleFraction / 2f).coerceIn(0f, 1f - visibleFraction)
+    val top = (centerFracY - visibleFraction / 2f).coerceIn(0f, 1f - visibleFraction)
+
+    return RectF(left, top, left + visibleFraction, top + visibleFraction)
 }
 
 private fun CameraSelection.label(): String = when (this) {

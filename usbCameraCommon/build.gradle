@@ -49,11 +49,14 @@ android {
 dependencies {
 	api fileTree(dir: 'libs', include: ['*.jar'])
 
-	implementation "com.android.support:support-v4:${supportLibVersion}"
-	implementation "com.android.support:support-annotations:${supportLibVersion}"
+	// AndroidX-Migration (2026-07-21): analog zu libuvccamera/build.gradle.
+	implementation 'androidx.legacy:legacy-support-v4:1.0.0'
+	implementation 'androidx.annotation:annotation:1.8.0'
 
-	implementation("com.serenegiant:common:${commonLibVersion}") {
+	// api statt implementation: IAspectRatioView & Co. muessen fuer abhaengige Module
+	// (z.B. bookscanner-app) transitiv auf dem Compile-Classpath sichtbar sein.
+	api("com.serenegiant:common:${commonLibVersion}") {
    		exclude module: 'support-v4'
    	}
-	implementation project(':libuvccamera')
+	api project(':libuvccamera')
 }

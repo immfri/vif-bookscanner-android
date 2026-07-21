@@ -76,8 +76,13 @@ android {
 dependencies {
     implementation fileTree(dir: new File(buildDir, 'libs'), include: '*.jar')
 
-	implementation "com.android.support:support-v4:${supportLibVersion}"
-	implementation "com.android.support:support-annotations:${supportLibVersion}"
+	// AndroidX-Migration (2026-07-21): com.android.support ersetzt durch die androidx-
+	// Aequivalente, da das neue Modul ':bookscanner-app' (Jetpack Compose) zwingend
+	// android.useAndroidX=true im Gesamt-Build braucht. BaseActivity.java/BaseFragment.java
+	// wurden auf androidx.annotation/androidx.appcompat umgestellt (siehe dortige Imports).
+	implementation 'androidx.legacy:legacy-support-v4:1.0.0'
+	implementation 'androidx.appcompat:appcompat:1.7.0'
+	implementation 'androidx.annotation:annotation:1.8.0'
 
 	implementation("com.serenegiant:common:${commonLibVersion}") {
 		exclude module: 'support-v4'

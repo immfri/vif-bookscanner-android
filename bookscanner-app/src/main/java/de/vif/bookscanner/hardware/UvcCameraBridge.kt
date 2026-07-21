@@ -140,9 +140,16 @@ class UvcCameraBridge(
          * Messfenster kleiner als die zu messende Groesse zu waehlen. */
         private const val FRAME_READ_POLL_MAX_ATTEMPTS = 500
 
-        /** USB-Bandbreiten-Faktor je Kamera im Dual-Preview-Betrieb (zwei parallele
-         * 320x240-Streams). Fuer Voll-Aufloesungs-Captures wird temporaer 1.0 angefordert
-         * (siehe captureFullResolutionThenReturnToPreview, Root-Cause "too few scanlines"). */
+        /** USB-Bandbreiten-Faktor je Kamera, fest fuer die gesamte Handler-Lebensdauer (Preview
+         * UND Voll-Aufloesungs-Capture) — reopenAtSize() aendert ihn nie (nur setPreviewSize(),
+         * keine Bandbreiten-Aenderung). VERALTETER Stand (vor Commit b22d517/3563b78): frueher
+         * schaltete resize(w,h,1.0f) fuer den Capture-Moment temporaer auf volle Bandbreite; das
+         * entfiel mit dem Umstieg auf reopenAtSize() und war seither ungenutzter Blindcode
+         * (siehe resize(int,int,float)-Ueberladung unten). Live verifiziert: EIN Vollaufloesungs-
+         * Stream bei 4656x3496 UND ZWEI GLEICHZEITIGE laufen beide zuverlaessig bei 0.5 (siehe
+         * ScannerViewModel#start_capture-Kommentar) — die fruehere Annahme "1.0 fuer Capture
+         * pflicht, zwei simultane Streams physikalisch unmoeglich" beruhte auf einem Test mit dem
+         * damals noch kaputten In-Place-resize() und ist widerlegt. */
         const val DUAL_PREVIEW_BANDWIDTH_FACTOR = 0.5f
     }
 
@@ -585,31 +592,23 @@ class UvcCameraBridge(
      * einen Frame binaer auf (via UVCCameraHandler#captureStill, kein manuelles Decode/Encode
      * im App-Code) und schaltet danach zurueck auf die Vorschau-Aufloesung.
      *
-     * USB2-Bandbreite erlaubt keinen simultanen Preview+Capture in voller Aufloesung, deshalb
-     * der explizite resize()-Umweg (siehe UVCCameraHandler#resize -> AbstractUVCCameraHandler).
+     * USB2-Bandbreite erlaubt keinen simultanen Preview+Capture in voller Aufloesung auf
+     * DERSELBEN Kamera, deshalb der explizite reopenAtSize()-Umweg. Zwei VERSCHIEDENE Kameras
+     * gleichzeitig in voller Aufloesung sind dagegen kein Problem — siehe
+     * [UvcCameraBridge.DUAL_PREVIEW_BANDWIDTH_FACTOR] und ScannerViewModel#start_capture
+     * (echtes Parallel-Capture, live verifiziert).
      *
      * Nach dem Capture wird die Schaerfe der geschriebenen Datei gegen den Kalibrier-
      * Referenzwert geprueft (siehe [verifyFocusAfterCapture]) — kein festes N-Aufnahmen-
      * Intervall (siehe Klassenkommentar), sondern echte Pro-Aufnahme-Verifikation.
      *
      * @param targetFile Zieldatei (Dateiname bereits via BookscanFileNamer gebaut).
-     * @param onImageSecured PARALLELITAETS-TEST 2026-07-21 (Main-Thread): feuert, sobald die
-     *   Bilddatei dieser Kamera vollstaendig geschrieben ist — noch VOR dem Reopen zurueck auf
-     *   Preview-Aufloesung. Ab hier braucht diese Kamera nur noch die niedrige Preview-
-     *   Bandbreite (~0.1-0.2), nicht mehr die volle Capture-Bandbreite (1.0). Der Aufrufer kann
-     *   deshalb an dieser Stelle sicher die NAECHSTE Kamera auf Capture-Aufloesung hochfahren
-     *   (volle Bandbreite 1.0), OHNE mit einem zweiten vollen 1.0-Stream zu kollidieren — das
-     *   waere physikalisch unmoeglich (siehe ScannerViewModel#start_capture-Kommentar zum
-     *   gemeinsamen USB2-Baum). Ungenutzt lassen (Default) verhaelt sich wie vorher rein
-     *   sequenziell.
      * @param onDone Callback (Main-Thread) nach VOLLSTAENDIGEM Abschluss (inkl. Reopen-runter,
-     *   EXIF, Fokus-Verify) — Rundenabschluss/Buchhaltung muss an DIESES Callback haengen, nicht
-     *   an [onImageSecured].
+     *   EXIF, Fokus-Verify).
      */
     fun captureFullResolutionThenReturnToPreview(
         camera: CameraSelection,
         targetFile: File,
-        onImageSecured: () -> Unit = {},
         onDone: () -> Unit
     ) {
         val handler = handlerFor(camera)
@@ -665,9 +664,6 @@ class UvcCameraBridge(
             handler.post {
                 mainHandler.post {
                     Log.i(TAG, "capture($camera): Bild gesichert, +${System.currentTimeMillis() - cycleStartMs}ms")
-                    // PARALLELITAETS-TEST 2026-07-21: image is safely on disk here, before the
-                    // reopen back down to preview even starts — see onImageSecured doc above.
-                    onImageSecured()
                     reopenAtSize(camera, previewW, previewH) {
                         applyManualControls(camera, controlPrefs.load(camera))
                         applyExifMetadata(camera, targetFile)

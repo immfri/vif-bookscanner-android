@@ -244,21 +244,25 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
      * verbundenen Kameras (LEFT + RIGHT) in voller Aufloesung auf — eine Blaetterung = eine
      * linke + eine rechte Buchseite.
      *
-     * Echtes paralleles Capture (beide Kameras gleichzeitig in voller Aufloesung, je
-     * bandwidthFactor 0.5) wurde 2026-07-21 verworfen — zwei simultane 4656x3496-Streams mit
-     * je 0.5 lieferten nachweislich nur unvollstaendige Frames (libuvc verwarf alle). Zwei volle
-     * 1.0-Streams gleichzeitig sind auf dem gemeinsamen USB2-Baum physikalisch unmoeglich (auch
-     * an einem USB3-Hub teilen sich USB2-Geraete upstream EINEN gemeinsamen 480-Mbit/s-Baum).
-     *
-     * PARALLELITAETS-TEST 2026-07-21 (kontrollierte Teil-Ueberlappung statt echtem Parallel-
-     * Capture): sobald Kamera N ihr Bild gesichert hat, braucht sie nur noch die niedrige
-     * Preview-Bandbreite fuer ihr Reopen-runter — genau in diesem Fenster faehrt Kamera N+1
-     * bereits auf volle Capture-Bandbreite hoch (siehe [UvcCameraBridge.captureFullResolutionThenReturnToPreview]
-     * `onImageSecured`-Callback). Nie zwei Kameras gleichzeitig auf voller 1.0-Bandbreite —
-     * ueberlappt wird nur die WARTEZEIT vom Reopen-runter der einen mit dem Reopen-hoch der
-     * naechsten. Startreihenfolge bleibt sequenziell (Index-fuer-Index), aber Start N+1 wartet
-     * nicht mehr auf das VOLLSTAENDIGE onDone von N (inkl. EXIF/Fokus-Verify), sondern nur auf
-     * die gesicherte Bilddatei.
+     * GESCHICHTE (2026-07-21, drei Iterationen am selben Tag):
+     * 1. Sequenziell: Kamera A komplett (Reopen-hoch -> Capture -> Reopen-runter -> Verify),
+     *    DANACH Kamera B. Frueher verworfenes "echtes Parallel-Capture je 0.5 Bandbreite"
+     *    lieferte damals nur unvollstaendige Frames — ABER dieser Test lief mit dem damals noch
+     *    kaputten In-Place-resize() (siehe [UvcCameraBridge] Root-Cause-Historie), das selbst im
+     *    Einzelkamera-Betrieb bei JEDER Bandbreite oberhalb 640x480 nie einen vollstaendigen
+     *    Frame lieferte. Die daraus gezogene Schlussfolgerung "zwei simultane Streams sind
+     *    physikalisch unmoeglich" war dadurch nicht sauber isoliert.
+     * 2. Teil-Ueberlappung: Start von Kamera B haengt an `onImageSecured` (Bild von A geschrieben)
+     *    statt an `onDone` (voller Abschluss inkl. Reopen-runter+Verify) — 6,26s -> ~5,4s.
+     * 3. ECHTES PARALLEL-CAPTURE (aktueller Stand): nachdem reopenAtSize() sich als zuverlaessig
+     *    erwiesen hatte, wurde die "physikalisch unmoeglich"-Annahme erneut getestet — diesmal mit
+     *    dem FUNKTIONIERENDEN reopenAtSize()-Mechanismus. Beide Kameras werden jetzt SOFORT
+     *    gleichzeitig gestartet (kein Verketten mehr). Bandbreite bleibt bei BEIDEN Kameras
+     *    dauerhaft auf [UvcCameraBridge.DUAL_PREVIEW_BANDWIDTH_FACTOR] (0.5) — reopenAtSize()
+     *    aendert sie nie (siehe dortiger Kommentar). Live verifiziert, zwei Wiederholungen: 4,03s
+     *    und 3,53s Gesamtzeit, beide Dateien je Lauf vollstaendig dekodierbar bei 4656x3496, kein
+     *    Absturz, keine "too few scanlines"-Fehler. Die "physikalisch unmoeglich"-Annahme war
+     *    schlicht falsch — sie beruhte auf dem konfundierten Test aus Schritt 1.
      *
      * Ist nur EINE Kamera verbunden (z.B. Einzelkamera-Betrieb/Test), wird nur diese
      * aufgenommen — kein Fehler. Die Seitenzahl wird EINMAL pro Doppelseiten-Aufnahme
@@ -268,10 +272,9 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
      * Thread-Sicherheit: die Completion-Callbacks von captureFullResolutionThenReturnToPreview
      * werden via mainHandler auf dem Main-Thread ausgeliefert (siehe UvcCameraBridge) —
      * capturedThisRound/completedCount brauchen deshalb kein Lock, die Callbacks laufen
-     * seriell auf dem Main-Looper. Abschluss-Buchhaltung (capturedThisRound/completedCount/
-     * RECHECK-Uebergang) haengt an onDone (voller Abschluss je Kamera), NICHT an
-     * onImageSecured — Fertigstellungsreihenfolge kann dadurch von der Startreihenfolge
-     * abweichen, die Sortierung nach Dateiname am Rundenende macht das irrelevant.
+     * seriell auf dem Main-Looper. Fertigstellungsreihenfolge kann von der Startreihenfolge
+     * abweichen (beide Kameras laufen unabhaengig), die Sortierung nach Dateiname am
+     * Rundenende macht das irrelevant.
      */
     fun start_capture() {
         if (state != ScannerState.PREVIEW) return
@@ -315,10 +318,8 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
 
         val roundStartMs = System.currentTimeMillis()
 
-        // PARALLELITAETS-TEST 2026-07-21: Start von Kamera N+1 haengt jetzt an onImageSecured
-        // (Bild von Kamera N ist geschrieben) statt an onDone (voller Abschluss inkl.
-        // Reopen-runter+EXIF+Verify von Kamera N) — siehe Klassenkommentar oben. Echtes
-        // Voll-Bandbreite-Parallel-Capture bleibt ausgeschlossen (siehe Kommentar oben).
+        // Beide Kameras starten SOFORT gleichzeitig (kein Verketten) — siehe Klassenkommentar
+        // oben ("ECHTES PARALLEL-CAPTURE") fuer die Historie/Begruendung.
         fun captureAt(index: Int) {
             if (index >= connectedCameras.size) return
             val camera = connectedCameras[index]
@@ -328,14 +329,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 camera = camera
             )
             val targetFile = storageRepository.reserveCaptureFile(fileName)
-            bridge.captureFullResolutionThenReturnToPreview(
-                camera,
-                targetFile,
-                onImageSecured = {
-                    Log.i(TAG, "start_capture: $camera Bild gesichert, +${System.currentTimeMillis() - roundStartMs}ms seit Rundenstart — starte naechste Kamera")
-                    captureAt(index + 1)
-                }
-            ) {
+            bridge.captureFullResolutionThenReturnToPreview(camera, targetFile) {
                 storageRepository.publishCapturedFile(targetFile)
                 capturedThisRound.add(targetFile)
                 captureCompletedCount += 1
@@ -351,7 +345,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
         }
-        captureAt(0)
+        connectedCameras.indices.forEach { captureAt(it) }
     }
 
     /** Nutzer bestaetigt die aufgenommene Seite in RECHECK -> zurueck PREVIEW fuer naechste Seite. */

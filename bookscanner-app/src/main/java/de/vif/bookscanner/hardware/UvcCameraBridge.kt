@@ -66,6 +66,11 @@ class UvcCameraBridge(
          * gegen den Kalibrier-Referenzwert (siehe [verifyFocusAfterCapture]). Default no-op,
          * damit bestehende Listener-Implementierungen nicht brechen. */
         fun onSharpnessOutOfTolerance(camera: CameraSelection, measured: Double, reference: Double) {}
+
+        /** Start-Gate (User-Vorgabe 2026-07-21): Anzahl der angeschlossenen USB-Kameras hat
+         * sich geaendert (Attach/Detach). Die App blockiert unter 2 Kameras mit einer
+         * Fehlermeldung statt weiterzulaufen. Default no-op. */
+        fun onAttachedCameraCountChanged(count: Int) {}
     }
 
     companion object {
@@ -1001,9 +1006,18 @@ class UvcCameraBridge(
 
     fun setAutoRetryEnabled(value: Boolean) = controlPrefs.setAutoRetryEnabled(value)
 
+    /** Anzahl aktuell angeschlossener (attached, nicht notwendigerweise geoeffneter)
+     * USB-Kamera-Geraete — fuer das Start-Gate (App blockiert unter 2 Kameras). */
+    private val attachedDevices = mutableSetOf<String>()
+
+    /** Anzahl der aktuell per USB angeschlossenen Kamera-Geraete (Start-Gate-Kriterium). */
+    fun getAttachedCameraCount(): Int = attachedDevices.size
+
     private val deviceConnectListener = object : OnDeviceConnectListener {
         override fun onAttach(device: UsbDevice) {
             Log.v(TAG, "onAttach: $device")
+            attachedDevices.add(device.deviceName)
+            mainHandler.post { listener.onAttachedCameraCountChanged(attachedDevices.size) }
             // Nur fuer noch freie Kamera-Slots (L/R) um Permission fragen — sonst wuerde bei
             // jedem beliebigen dritten USB-Geraet unnoetig ein Dialog aufpoppen.
             val freeSlotAvailable = handlerL?.isOpened != true || handlerR?.isOpened != true
@@ -1128,6 +1142,8 @@ class UvcCameraBridge(
 
         override fun onDettach(device: UsbDevice) {
             Log.v(TAG, "onDettach: $device")
+            attachedDevices.remove(device.deviceName)
+            mainHandler.post { listener.onAttachedCameraCountChanged(attachedDevices.size) }
         }
 
         override fun onCancel(device: UsbDevice) {

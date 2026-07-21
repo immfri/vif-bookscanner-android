@@ -77,6 +77,10 @@ class MainActivity : ComponentActivity() {
                         Toast.LENGTH_LONG
                     ).show()
                 }
+
+                override fun onAttachedCameraCountChanged(count: Int) {
+                    viewModel.on_attached_camera_count_changed(count)
+                }
             }
         )
         viewModel.cameraBridge = cameraBridge

@@ -35,6 +35,17 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     var state by mutableStateOf(ScannerState.CALIBRATION)
         private set
 
+    /** Start-Gate (User-Vorgabe 2026-07-21): Anzahl der aktuell angeschlossenen USB-Kameras.
+     * Unter [REQUIRED_CAMERA_COUNT] blockiert die App vollstaendig mit Fehlermeldung
+     * (siehe DeviceGateScreen in BookscannerApp) — sie laeuft NICHT mit einer oder null
+     * Kameras weiter. */
+    var attachedCameraCount by mutableStateOf(0)
+        private set
+
+    fun on_attached_camera_count_changed(count: Int) {
+        attachedCameraCount = count
+    }
+
     var activeCamera by mutableStateOf(CameraSelection.LEFT)
         private set
 
@@ -370,5 +381,9 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
 
         /** Fixer Projektname fuer den Test-Capture-Loop (Debug-Modus, siehe Plan Punkt 5). */
         const val TEST_LOOP_PROJECT_NAME = "autofocus-drift-test"
+
+        /** Start-Gate: Mindestanzahl angeschlossener USB-Kameras, unter der die App
+         * vollstaendig blockiert (Doppelseiten-Scanner braucht zwingend beide). */
+        const val REQUIRED_CAMERA_COUNT = 2
     }
 }

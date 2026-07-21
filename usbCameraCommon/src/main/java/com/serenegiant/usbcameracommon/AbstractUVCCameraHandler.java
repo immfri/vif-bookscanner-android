@@ -105,6 +105,23 @@ abstract class AbstractUVCCameraHandler extends Handler {
 		return thread != null ? thread.getHeight() : 0;
 	}
 
+	/**
+	 * Setzt die Preview-Groesse, die beim NAECHSTEN {@link #startPreview(Object)}-Aufruf
+	 * verwendet wird. ERGAENZUNG (vif-bookscanner, 2026-07-21): fuer generische UVC-Kamera-
+	 * Kompatibilitaet — die Konstruktor-Groesse ({@code createHandler(...)}) ist nur ein
+	 * Platzhalter, bis nach {@link #open}/{@link #getCamera()} die tatsaechlich unterstuetzten
+	 * Groessen der jeweils angeschlossenen Kamera bekannt sind. Wirkt NUR vor dem ersten
+	 * startPreview() bzw. nach einem stopPreview() — waehrend eine Preview aktiv laeuft, aendert
+	 * dies nichts (echtes Mid-Stream-Resize ist {@link #resize(int, int)} vorbehalten, das in
+	 * dieser Codebasis aktuell nirgends implementiert ist, siehe dortiger Default-Wurf).
+	 */
+	public void setPreviewSize(final int width, final int height) {
+		final CameraThread thread = mWeakThread.get();
+		if (thread != null) {
+			thread.setSize(width, height);
+		}
+	}
+
 	public boolean isOpened() {
 		final CameraThread thread = mWeakThread.get();
 		return thread != null && thread.isCameraOpened();
@@ -514,6 +531,14 @@ abstract class AbstractUVCCameraHandler extends Handler {
 		public int getHeight() {
 			synchronized (mSync) {
 				return mHeight;
+			}
+		}
+
+		/** Siehe {@link AbstractUVCCameraHandler#setPreviewSize(int, int)}. */
+		public void setSize(final int width, final int height) {
+			synchronized (mSync) {
+				mWidth = width;
+				mHeight = height;
 			}
 		}
 

@@ -40,12 +40,13 @@ import java.io.File
  */
 class UvcCameraBridge(
     private val activity: Activity,
-    // DEBUG-TEST 2026-07-21: 320x240 stand in der Spec (aus der RPi/V4L2-Doku uebernommen),
-    // aber die echte ArduCAM meldet laut UVC-Descriptor NUR 640x480 als kleinste unterstuetzte
-    // Groesse (MJPEG: 4656x3496...640x480, Uncompressed: 800x600/640x480) — 320x240 existiert
-    // in keiner der beiden Formatlisten. Testweise auf 640x480 gesetzt, um zu pruefen ob das
-    // der Grund fuer das leere Vorschaubild ist. TODO: sobald bestaetigt, gehoert das in die
-    // generische UVC-Settings-Architektur (dynamische Groessenwahl aus getSupportedSize()).
+    // ERSETZT die vorherige feste 640x480-Debug-Loesung (Testwert speziell fuer die ArduCAM
+    // IMX298, siehe Git-Historie): dient jetzt NUR NOCH als Konstruktor-/Fallback-Wert, bevor
+    // die tatsaechlich angeschlossene Kamera bekannt ist bzw. falls die Groessenermittlung
+    // fehlschlaegt (siehe [resolveCameraSizes]). Sobald eine Kamera verbunden ist, wird die
+    // ECHTE Preview-Groesse dynamisch aus [UVCCamera.getSupportedSizeList] ermittelt (naechste
+    // an 320x240, der urspruenglichen Spec-Vorgabe) — generische UVC-Kompatibilitaet statt
+    // kamera-spezifischem Festwert.
     private val previewWidth: Int = 640,
     private val previewHeight: Int = 480,
     private val listener: Listener
@@ -69,9 +70,19 @@ class UvcCameraBridge(
     companion object {
         private const val TAG = "UvcCameraBridge"
 
-        /** Volle Sensor-Aufloesung fuer den Capture-Modus (USB2-Bandbreite erzwingt Mode-Switch). */
+        /** Fallback-Sensor-Aufloesung fuer den Capture-Modus (USB2-Bandbreite erzwingt Mode-
+         * Switch), NUR falls die dynamische Groessenermittlung (siehe [resolveCameraSizes])
+         * fehlschlaegt oder noch nicht gelaufen ist. Im Normalfall wird pro Kamera-Slot die
+         * tatsaechlich groesste vom UVC-Descriptor gemeldete Groesse verwendet (maximale
+         * Qualitaet, kamera-agnostisch statt hartcodiert). */
         const val CAPTURE_WIDTH = 1280
         const val CAPTURE_HEIGHT = 720
+
+        /** Zielflaeche fuer die dynamische Preview-Groessenwahl — die urspruengliche Spec
+         * verlangte 320x240; existiert diese Groesse nicht in der von der Kamera gemeldeten
+         * Liste, wird die flaechenmaessig naechstgelegene ECHTE unterstuetzte Groesse gewaehlt
+         * (siehe [resolveCameraSizes]), nicht geraten. */
+        private const val PREVIEW_TARGET_AREA = 320L * 240L
 
         private const val CAPTURE_SETTLE_DELAY_MS = 400L
 
@@ -128,6 +139,80 @@ class UvcCameraBridge(
     private var pendingCtrlBlockL: UsbControlBlock? = null
     private var pendingCtrlBlockR: UsbControlBlock? = null
 
+    // Dynamisch ermittelte Groessen (Punkt "generische UVC-Vollkompatibilitaet", 2026-07-21):
+    // pro Kamera-Slot befuellt in [resolveCameraSizes], NACHDEM handler.open() erfolgreich war
+    // und die echte UVC-Descriptor-Groessenliste abgefragt werden konnte. null = noch nicht
+    // ermittelt bzw. Ermittlung fehlgeschlagen -> [previewSizeFor]/[captureSizeFor] fallen dann
+    // auf die Konstruktor-/Companion-Fallback-Werte zurueck.
+    private var resolvedPreviewSizeL: Pair<Int, Int>? = null
+    private var resolvedPreviewSizeR: Pair<Int, Int>? = null
+    private var resolvedCaptureSizeL: Pair<Int, Int>? = null
+    private var resolvedCaptureSizeR: Pair<Int, Int>? = null
+
+    private fun previewSizeFor(camera: CameraSelection): Pair<Int, Int> =
+        (when (camera) {
+            CameraSelection.LEFT -> resolvedPreviewSizeL
+            CameraSelection.RIGHT -> resolvedPreviewSizeR
+        }) ?: (previewWidth to previewHeight)
+
+    private fun captureSizeFor(camera: CameraSelection): Pair<Int, Int> =
+        (when (camera) {
+            CameraSelection.LEFT -> resolvedCaptureSizeL
+            CameraSelection.RIGHT -> resolvedCaptureSizeR
+        }) ?: (CAPTURE_WIDTH to CAPTURE_HEIGHT)
+
+    /**
+     * Fragt NACH erfolgreichem `handler.open()` die vom UVC-Descriptor tatsaechlich gemeldeten
+     * Groessen ab ([UVCCamera.getSupportedSizeList], ueber [UVCCameraHandler.getCamera] — siehe
+     * Klassenkommentar/AbstractUVCCameraHandler-Ergaenzung) und waehlt:
+     * - Preview: die Groesse mit der zur Zielflaeche [PREVIEW_TARGET_AREA] (320x240) naechst-
+     *   gelegenen Flaeche (nicht geraten, echte Liste).
+     * - Capture: die Groesse mit der GROESSTEN Flaeche (maximale Qualitaet laut Spec).
+     *
+     * Setzt die Preview-Groesse zusaetzlich sofort ueber [UVCCameraHandler.setPreviewSize] (wirkt
+     * nur VOR dem ersten [startPreview] fuer diesen Slot — muss deshalb vor [startPreview]
+     * aufgerufen werden, siehe dortiger Kommentar). Die Capture-Groesse wird nur gespeichert
+     * ([captureSizeFor]) und von den bestehenden resize()-Aufrufen (Mode-Switch) gelesen.
+     *
+     * Bei leerer/fehlender Liste (z.B. Kamera meldet nichts) bleiben die Fallback-Werte
+     * (Konstruktor-previewWidth/-Height bzw. [CAPTURE_WIDTH]/[CAPTURE_HEIGHT]) unveraendert
+     * aktiv — klar geloggt, kein Absturz.
+     */
+    private fun resolveCameraSizes(camera: CameraSelection, handler: UVCCameraHandler) {
+        val rawCamera = handler.camera
+        val sizes = try {
+            rawCamera?.supportedSizeList
+        } catch (e: Exception) {
+            Log.w(TAG, "resolveCameraSizes($camera): getSupportedSizeList() fehlgeschlagen, Fallback-Groessen bleiben aktiv", e)
+            null
+        }
+        if (sizes.isNullOrEmpty()) {
+            Log.w(TAG, "resolveCameraSizes($camera): Kamera meldet keine unterstuetzten Groessen, Fallback ${previewWidth}x$previewHeight (Preview) / ${CAPTURE_WIDTH}x$CAPTURE_HEIGHT (Capture) bleibt aktiv")
+            return
+        }
+
+        sizes.minByOrNull { kotlin.math.abs(it.width.toLong() * it.height - PREVIEW_TARGET_AREA) }?.let { preview ->
+            when (camera) {
+                CameraSelection.LEFT -> resolvedPreviewSizeL = preview.width to preview.height
+                CameraSelection.RIGHT -> resolvedPreviewSizeR = preview.width to preview.height
+            }
+            try {
+                handler.setPreviewSize(preview.width, preview.height)
+            } catch (e: Exception) {
+                Log.w(TAG, "resolveCameraSizes($camera): setPreviewSize(${preview.width}x${preview.height}) fehlgeschlagen", e)
+            }
+            Log.i(TAG, "resolveCameraSizes($camera): Preview dynamisch ermittelt: ${preview.width}x${preview.height} (Ziel nahe 320x240, ${sizes.size} echte Groessen gemeldet)")
+        }
+
+        sizes.maxByOrNull { it.width.toLong() * it.height }?.let { capture ->
+            when (camera) {
+                CameraSelection.LEFT -> resolvedCaptureSizeL = capture.width to capture.height
+                CameraSelection.RIGHT -> resolvedCaptureSizeR = capture.width to capture.height
+            }
+            Log.i(TAG, "resolveCameraSizes($camera): Capture dynamisch ermittelt (max. Qualitaet): ${capture.width}x${capture.height}")
+        }
+    }
+
     // Regionsbezogene Schaerfemessung (Punkt 2, 2026-07-21): optionaler Bildausschnitt pro
     // Kamera-Slot, aus dem im Live-Feed herangezoomten/ausgewaehlten Bereich abgeleitet (siehe
     // SettingsScreen.LiveFeedPinchZoom). null = Vollbild (Default-/Rueckwaertskompatibles
@@ -160,11 +245,13 @@ class UvcCameraBridge(
         return Rect(left, top, right, bottom)
     }
 
-    /** Aktuelle Preview-Aufloesung (fuer die naeherungsweise Crop-Rect-Umrechnung in der UI). */
-    fun getPreviewSize(): Pair<Int, Int> = previewWidth to previewHeight
+    /** Aktuelle (dynamisch ermittelte, sonst Fallback-) Preview-Aufloesung von [camera] — fuer
+     * die naeherungsweise Crop-Rect-Umrechnung in der UI. */
+    fun getPreviewSize(camera: CameraSelection): Pair<Int, Int> = previewSizeFor(camera)
 
-    /** Volle Capture-Aufloesung (fuer die naeherungsweise Crop-Rect-Umrechnung in der UI). */
-    fun getCaptureSize(): Pair<Int, Int> = CAPTURE_WIDTH to CAPTURE_HEIGHT
+    /** Aktuelle (dynamisch ermittelte, sonst Fallback-) volle Capture-Aufloesung von [camera] —
+     * fuer die naeherungsweise Crop-Rect-Umrechnung in der UI. */
+    fun getCaptureSize(camera: CameraSelection): Pair<Int, Int> = captureSizeFor(camera)
 
     /** Muss vor [register] aufgerufen werden, sobald die Compose-AndroidView bereit ist. */
     fun bindCameraView(camera: CameraSelection, view: CameraViewInterface) {
@@ -234,6 +321,7 @@ class UvcCameraBridge(
         try {
             handler.open(ctrlBlock)
             mainHandler.post {
+                resolveCameraSizes(camera, handler)
                 startPreview(camera)
                 applyManualControls(camera, controlPrefs.load(camera))
                 listener.onCameraOpened(camera)
@@ -331,10 +419,11 @@ class UvcCameraBridge(
         // Mode-Switch ueberhaupt beginnt — siehe [quickPreviewFocusCheck].
         quickPreviewFocusCheck(camera)
 
+        val (captureW, captureH) = captureSizeFor(camera)
         try {
-            handler.resize(CAPTURE_WIDTH, CAPTURE_HEIGHT)
+            handler.resize(captureW, captureH)
         } catch (e: Exception) {
-            Log.w(TAG, "resize auf Capture-Aufloesung fehlgeschlagen, capture mit aktueller Aufloesung", e)
+            Log.w(TAG, "resize auf Capture-Aufloesung ${captureW}x$captureH fehlgeschlagen, capture mit aktueller Aufloesung", e)
         }
 
         // Kurze Verzoegerung damit der native Mode-Switch (neues UVC-Streaming-Setup) greift,
@@ -347,10 +436,11 @@ class UvcCameraBridge(
             }
 
             mainHandler.postDelayed({
+                val (previewW, previewH) = previewSizeFor(camera)
                 try {
-                    handler.resize(previewWidth, previewHeight)
+                    handler.resize(previewW, previewH)
                 } catch (e: Exception) {
-                    Log.w(TAG, "resize zurueck auf Preview-Aufloesung fehlgeschlagen", e)
+                    Log.w(TAG, "resize zurueck auf Preview-Aufloesung ${previewW}x$previewH fehlgeschlagen", e)
                 }
                 applyManualControls(camera, controlPrefs.load(camera))
                 verifyFocusAfterCapture(camera, targetFile)
@@ -378,10 +468,11 @@ class UvcCameraBridge(
             Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): Kamera nicht geoeffnet, Diagnose abgebrochen")
             return
         }
-        Log.i(TAG, "diagnoseModeSwitchSettleTime($camera): starte Moduswechsel auf ${CAPTURE_WIDTH}x$CAPTURE_HEIGHT, $frameCount Frames ohne Wartezeit")
+        val (captureW, captureH) = captureSizeFor(camera)
+        Log.i(TAG, "diagnoseModeSwitchSettleTime($camera): starte Moduswechsel auf ${captureW}x$captureH, $frameCount Frames ohne Wartezeit")
         val switchStartMs = System.currentTimeMillis()
         try {
-            handler.resize(CAPTURE_WIDTH, CAPTURE_HEIGHT)
+            handler.resize(captureW, captureH)
         } catch (e: Exception) {
             Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): resize fehlgeschlagen, Diagnose abgebrochen", e)
             return
@@ -389,8 +480,9 @@ class UvcCameraBridge(
 
         fun captureFrame(index: Int) {
             if (index >= frameCount) {
+                val (previewW, previewH) = previewSizeFor(camera)
                 try {
-                    handler.resize(previewWidth, previewHeight)
+                    handler.resize(previewW, previewH)
                 } catch (e: Exception) {
                     Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): resize zurueck auf Preview fehlgeschlagen", e)
                 }
@@ -478,10 +570,11 @@ class UvcCameraBridge(
             // hoch, alle Sweep-Schritte darin, dann einmal zurueck (statt pro Schritt zu
             // wechseln — deutlich schneller, volle Aufloesung ist trotzdem waehrend des
             // gesamten Sweeps aktiv).
+            val (captureW, captureH) = captureSizeFor(camera)
             try {
-                handler.resize(CAPTURE_WIDTH, CAPTURE_HEIGHT)
+                handler.resize(captureW, captureH)
             } catch (e: Exception) {
-                Log.w(TAG, "calibrateAuto($camera): resize auf Capture-Aufloesung fuer Sweep fehlgeschlagen", e)
+                Log.w(TAG, "calibrateAuto($camera): resize auf Capture-Aufloesung ${captureW}x$captureH fuer Sweep fehlgeschlagen", e)
             }
 
             mainHandler.postDelayed({
@@ -495,10 +588,11 @@ class UvcCameraBridge(
                         Log.w(TAG, "calibrateAuto($camera): Setzen des Sweep-Peak-Fokus fehlgeschlagen", e)
                     }
 
+                    val (previewW, previewH) = previewSizeFor(camera)
                     try {
-                        handler.resize(previewWidth, previewHeight)
+                        handler.resize(previewW, previewH)
                     } catch (e: Exception) {
-                        Log.w(TAG, "calibrateAuto($camera): resize zurueck auf Preview-Aufloesung fehlgeschlagen", e)
+                        Log.w(TAG, "calibrateAuto($camera): resize zurueck auf Preview-Aufloesung ${previewW}x$previewH fehlgeschlagen", e)
                     }
 
                     // Zweiter, EIGENER Referenzwert in Preview-Aufloesung (Punkt 3) — kein
@@ -807,6 +901,10 @@ class UvcCameraBridge(
             }
 
             mainHandler.post {
+                // Muss VOR startPreview() laufen (siehe [resolveCameraSizes]-Kommentar):
+                // setzt die dynamisch ermittelte Preview-Groesse, die erst nach handler.open()
+                // per echtem UVC-Descriptor bekannt ist.
+                resolveCameraSizes(slot, handler)
                 startPreview(slot)
                 // Gespeicherte Einstellungen dieses Slots (falls schon einmal kalibriert/
                 // gespeichert) sofort erneut auf den Treiber schreiben — siehe Arducam-

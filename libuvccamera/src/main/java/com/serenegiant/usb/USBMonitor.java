@@ -677,10 +677,25 @@ public final class USBMonitor {
 		}
 		if (useNewAPI && BuildCheck.isAndroid5()) {
 			sb.append("#");
+			// Android 12+ (API 31+) wirft SecurityException auf getSerialNumber()/
+			// getManufacturerName(), solange die USB-Permission fuer dieses Geraet noch
+			// nicht erteilt ist (hasPermission() ruft diese Methode aber genau VOR der
+			// Permission-Erteilung auf -> Henne-Ei-Problem). Ohne Permission einfach ohne
+			// Seriennummer/Herstellername weitermachen statt abzustuerzen.
 			if (TextUtils.isEmpty(serial)) {
-				sb.append(device.getSerialNumber());	sb.append("#");	// API >= 21
+				try {
+					sb.append(device.getSerialNumber());
+				} catch (final SecurityException e) {
+					// noch keine Permission -> Seriennummer weglassen
+				}
+				sb.append("#");	// API >= 21
 			}
-			sb.append(device.getManufacturerName());	sb.append("#");	// API >= 21
+			try {
+				sb.append(device.getManufacturerName());	// API >= 21
+			} catch (final SecurityException e) {
+				// noch keine Permission -> Herstellername weglassen
+			}
+			sb.append("#");
 			sb.append(device.getConfigurationCount());	sb.append("#");	// API >= 21
 			if (BuildCheck.isMarshmallow()) {
 				sb.append(device.getVersion());			sb.append("#");	// API >= 23

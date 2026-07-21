@@ -65,6 +65,13 @@ class UvcCameraBridge(
     private var pendingSurfaceL: Surface? = null
     private var pendingSurfaceR: Surface? = null
 
+    // Falls onConnect() feuert BEVOR die Compose-UvcPreview (und damit bindCameraView) fuer
+    // diesen Slot existiert (z.B. waehrend die App noch auf CALIBRATION/LOCK steht): das
+    // UsbControlBlock zwischenspeichern und beim spaeteren bindCameraView() nachholen, statt
+    // die Verbindung stillschweigend zu verlieren.
+    private var pendingCtrlBlockL: UsbControlBlock? = null
+    private var pendingCtrlBlockR: UsbControlBlock? = null
+
     /** Muss vor [register] aufgerufen werden, sobald die Compose-AndroidView bereit ist. */
     fun bindCameraView(camera: CameraSelection, view: CameraViewInterface) {
         when (camera) {
@@ -72,6 +79,7 @@ class UvcCameraBridge(
             CameraSelection.RIGHT -> viewR = view
         }
         ensureHandler(camera)
+        openPendingConnectionIfAny(camera)
     }
 
     private fun ensureHandler(camera: CameraSelection) {
@@ -90,6 +98,54 @@ class UvcCameraBridge(
         when (camera) {
             CameraSelection.LEFT -> handlerL = newHandler
             CameraSelection.RIGHT -> handlerR = newHandler
+        }
+
+        // WICHTIG: view.surfaceTexture ist direkt nach View-Erzeugung meist noch null (die
+        // TextureView-Surface wird erst asynchron nach dem Attach/Layout verfuegbar). Ohne
+        // diesen Callback bricht startPreview() beim ersten Versuch (Kamera-open-Zeitpunkt)
+        // still ab und wird nie erneut aufgerufen -> Preview bleibt dauerhaft ein grauer Block.
+        view.setCallback(object : CameraViewInterface.Callback {
+            override fun onSurfaceCreated(v: CameraViewInterface, surface: Surface) {
+                Log.d(TAG, "onSurfaceCreated fuer $camera — starte Preview falls Kamera offen")
+                when (camera) {
+                    CameraSelection.LEFT -> pendingSurfaceL = surface
+                    CameraSelection.RIGHT -> pendingSurfaceR = surface
+                }
+                if (handlerFor(camera)?.isOpened == true) {
+                    startPreview(camera)
+                }
+            }
+
+            override fun onSurfaceChanged(v: CameraViewInterface, surface: Surface, width: Int, height: Int) {}
+
+            override fun onSurfaceDestroy(v: CameraViewInterface, surface: Surface) {
+                Log.d(TAG, "onSurfaceDestroy fuer $camera")
+            }
+        })
+    }
+
+    private fun openPendingConnectionIfAny(camera: CameraSelection) {
+        val ctrlBlock = when (camera) {
+            CameraSelection.LEFT -> pendingCtrlBlockL
+            CameraSelection.RIGHT -> pendingCtrlBlockR
+        } ?: return
+        val handler = handlerFor(camera) ?: return
+        if (handler.isOpened) return
+
+        Log.d(TAG, "openPendingConnectionIfAny: hole nachgeholte Verbindung fuer $camera nach")
+        when (camera) {
+            CameraSelection.LEFT -> pendingCtrlBlockL = null
+            CameraSelection.RIGHT -> pendingCtrlBlockR = null
+        }
+        try {
+            handler.open(ctrlBlock)
+            mainHandler.post {
+                startPreview(camera)
+                listener.onCameraOpened(camera)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "openPendingConnectionIfAny: Handler.open() fuer $camera fehlgeschlagen", e)
+            listener.onError(camera, e)
         }
     }
 
@@ -130,8 +186,14 @@ class UvcCameraBridge(
             CameraSelection.LEFT -> viewL
             CameraSelection.RIGHT -> viewR
         } ?: return
-        val texture = view.surfaceTexture ?: return
-        val surface = Surface(texture)
+        // view.getSurface() ist die vom CameraViewInterface.Callback (onSurfaceCreated)
+        // bereitgestellte Surface — robuster als getSurfaceTexture(), das direkt nach
+        // View-Erzeugung meist noch null ist (siehe ensureHandler-Kommentar).
+        val surface = if (view.hasSurface()) view.surface else null
+        if (surface == null) {
+            Log.d(TAG, "startPreview($camera): Surface noch nicht bereit, warte auf onSurfaceCreated")
+            return
+        }
         when (camera) {
             CameraSelection.LEFT -> pendingSurfaceL = surface
             CameraSelection.RIGHT -> pendingSurfaceR = surface
@@ -195,19 +257,54 @@ class UvcCameraBridge(
     private val deviceConnectListener = object : OnDeviceConnectListener {
         override fun onAttach(device: UsbDevice) {
             Log.v(TAG, "onAttach: $device")
+            // Nur fuer noch freie Kamera-Slots (L/R) um Permission fragen — sonst wuerde bei
+            // jedem beliebigen dritten USB-Geraet unnoetig ein Dialog aufpoppen.
+            val freeSlotAvailable = handlerL?.isOpened != true || handlerR?.isOpened != true
+            if (freeSlotAvailable) {
+                usbMonitor?.requestPermission(device)
+            }
         }
 
         override fun onConnect(device: UsbDevice, ctrlBlock: UsbControlBlock, createNew: Boolean) {
-            // Erste noch nicht geoeffnete Kamera wird LEFT, die naechste RIGHT — wie usbCameraTest7.
+            Log.d(TAG, "onConnect: $device createNew=$createNew")
+            // Ein Slot gilt als "belegt", sobald er entweder schon offen ist ODER schon einen
+            // nachzuholenden ControlBlock wartend haelt (verhindert, dass zwei Geraete beide
+            // auf LEFT gemapped werden, wenn onConnect fuer beide feuert bevor irgendeine
+            // UvcPreview-View existiert).
+            val leftTaken = handlerL?.isOpened == true || pendingCtrlBlockL != null
+            val rightTaken = handlerR?.isOpened == true || pendingCtrlBlockR != null
             val slot = when {
-                handlerL?.isOpened != true -> CameraSelection.LEFT
-                handlerR?.isOpened != true -> CameraSelection.RIGHT
+                !leftTaken -> CameraSelection.LEFT
+                !rightTaken -> CameraSelection.RIGHT
                 else -> null
-            } ?: return
+            }
+            if (slot == null) {
+                Log.d(TAG, "onConnect: kein freier Slot mehr, Geraet wird ignoriert")
+                return
+            }
+            Log.d(TAG, "onConnect: Slot $slot zugewiesen, oeffne Handler")
 
             ensureHandler(slot)
-            val handler = handlerFor(slot) ?: return
-            handler.open(ctrlBlock)
+            val handler = handlerFor(slot)
+            if (handler == null) {
+                // UvcPreview (bindCameraView) fuer diesen Slot existiert noch nicht (z.B. App
+                // steht noch auf CALIBRATION/LOCK) — ControlBlock zwischenspeichern, wird in
+                // bindCameraView()/openPendingConnectionIfAny() nachgeholt statt verworfen.
+                Log.d(TAG, "onConnect: kein Handler fuer Slot $slot, ControlBlock wird zwischengespeichert")
+                when (slot) {
+                    CameraSelection.LEFT -> pendingCtrlBlockL = ctrlBlock
+                    CameraSelection.RIGHT -> pendingCtrlBlockR = ctrlBlock
+                }
+                return
+            }
+            try {
+                handler.open(ctrlBlock)
+                Log.d(TAG, "onConnect: Handler.open() fuer $slot aufgerufen")
+            } catch (e: Exception) {
+                Log.e(TAG, "onConnect: Handler.open() fuer $slot fehlgeschlagen", e)
+                listener.onError(slot, e)
+                return
+            }
             mainHandler.post {
                 startPreview(slot)
                 listener.onCameraOpened(slot)

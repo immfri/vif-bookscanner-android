@@ -1,0 +1,27 @@
+VIF BookScanner (dieses Repository)
+Copyright (c) 2026 Immanuel Friedrichsen
+
+Dieses Projekt ist ein Fork von UVCCamera:
+  https://github.com/saki4510t/UVCCamera
+  Copyright (c) 2014-2017 saki t_saki@serenegiant.com
+  Lizenziert unter der Apache License, Version 2.0.
+
+Das Gesamtwerk (Original + Ergänzungen) bleibt unter der Apache License,
+Version 2.0 lizenziert (siehe LICENSE-Datei). Diese NOTICE-Datei dokumentiert
+gemäß Abschnitt 4(d) der Apache License 2.0 die vorgenommenen Änderungen.
+
+Wesentliche Ergänzungen ab 2026 (Copyright (c) 2026 Immanuel Friedrichsen,
+lizenziert unter derselben Apache License 2.0):
+  - Neues Modul `bookscanner-app`: Android-App (Kotlin/Jetpack Compose) für einen
+    physischen Dual-Kamera-Buchscanner, inkl. Kamera-Kalibrier-Architektur
+    (Auto-/Manuell-Modus, Fokus-Sweep-Kalibrierung, Pro-Aufnahme-Schärfeprüfung),
+    dynamischer UVC-Auflösungserkennung und Dateibenennungs-Utility.
+  - Toolchain-Modernisierung: Ersatz von JCenter (Repository-Abschaltung 2021/22),
+    Android Gradle Plugin 3.1.4 → 8.5.2, ndk-build → CMake, AndroidX-Migration.
+  - Treiber-Fixes in `libuvccamera`/`usbCameraCommon`: mehrere Android-12/13/14-
+    Kompatibilitätsbugs (PendingIntent-Flags, RECEIVER_EXPORTED, USB-Permission-
+    Race-Conditions), echte `resize()`-Implementierung (war zuvor ein permanenter
+    `UnsupportedOperationException`-Stub im Original), erweiterte UVC-Control-APIs.
+
+Für Datei-spezifische Änderungen siehe die Git-Historie dieses Repositories
+(github.com/immfri/vif-bookscanner-android) ab dem Fork-Zeitpunkt.

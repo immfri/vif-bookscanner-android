@@ -3,6 +3,7 @@ package de.vif.bookscanner.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -16,6 +17,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import de.vif.bookscanner.hardware.UvcCameraBridge
 import de.vif.bookscanner.hardware.UvcControlSet
 import de.vif.bookscanner.state.CalibrationMode
 import de.vif.bookscanner.state.ScannerViewModel
@@ -30,40 +32,59 @@ import de.vif.bookscanner.state.ScannerViewModel
  * Manueller Modus: Slider fuer den kompletten UVC-Parametersatz, jede Aenderung wird sofort
  * live auf den Treiber geschrieben (Vorgabe: Live-Vorschau reagiert sofort).
  *
+ * WICHTIG: Split-Layout mit echter [UvcPreview] rechts — ohne diese View wird
+ * [UvcCameraBridge.bindCameraView] nie aufgerufen und die Kamera bleibt dauerhaft im
+ * "ControlBlock wird zwischengespeichert"-Wartezustand (live am Geraet gefunden: die Kamera
+ * wurde erkannt/onConnect feuerte, aber ohne Preview-View auf diesem Screen nie geoeffnet).
+ *
  * UNGETESTET: Kalibrier-Verhalten (Einschwingzeit, tatsaechliche Wertebereiche) ist mit
  * echter Hardware zu verifizieren.
  */
 @Composable
-fun CalibrationScreen(viewModel: ScannerViewModel) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp)
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
+fun CalibrationScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("Kalibrierung", style = MaterialTheme.typography.headlineSmall)
         Text("Kamera: ${viewModel.activeCamera}")
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = { viewModel.set_calibration_mode(CalibrationMode.AUTO) },
-                enabled = viewModel.calibrationMode != CalibrationMode.AUTO
-            ) { Text("Automodus") }
-            Button(
-                onClick = { viewModel.set_calibration_mode(CalibrationMode.MANUAL) },
-                enabled = viewModel.calibrationMode != CalibrationMode.MANUAL
-            ) { Text("Manueller Modus") }
-        }
+        Row(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .verticalScroll(rememberScrollState())
+                    .padding(end = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { viewModel.set_calibration_mode(CalibrationMode.AUTO) },
+                        enabled = viewModel.calibrationMode != CalibrationMode.AUTO
+                    ) { Text("Automodus") }
+                    Button(
+                        onClick = { viewModel.set_calibration_mode(CalibrationMode.MANUAL) },
+                        enabled = viewModel.calibrationMode != CalibrationMode.MANUAL
+                    ) { Text("Manueller Modus") }
+                }
 
-        if (viewModel.calibrationMode == CalibrationMode.AUTO) {
-            AutoCalibrationSection(viewModel)
-        } else {
-            ManualCalibrationSection(viewModel)
-        }
+                if (viewModel.calibrationMode == CalibrationMode.AUTO) {
+                    AutoCalibrationSection(viewModel)
+                } else {
+                    ManualCalibrationSection(viewModel)
+                }
 
-        Button(onClick = { viewModel.start_setup() }) {
-            Text("Weiter zu LOCK")
+                Button(onClick = { viewModel.start_setup() }) {
+                    Text("Weiter zu LOCK")
+                }
+            }
+
+            UvcPreview(
+                camera = viewModel.activeCamera,
+                cameraBridge = cameraBridge,
+                viewModel = viewModel,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+            )
         }
     }
 }

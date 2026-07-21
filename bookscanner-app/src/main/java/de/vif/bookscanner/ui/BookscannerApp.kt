@@ -16,7 +16,7 @@ import de.vif.bookscanner.state.ScannerViewModel
 fun BookscannerApp(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
     Column(modifier = androidx.compose.ui.Modifier.fillMaxSize()) {
         when (viewModel.state) {
-            ScannerState.CALIBRATION -> CalibrationScreen(viewModel)
+            ScannerState.CALIBRATION -> CalibrationScreen(viewModel, cameraBridge)
             ScannerState.LOCK -> LockScreen(viewModel)
             ScannerState.PREVIEW -> PreviewScreen(viewModel, cameraBridge)
             ScannerState.CAPTURE -> CaptureScreen(viewModel)

@@ -1,6 +1,7 @@
 package de.vif.bookscanner.hardware
 
 import android.graphics.Bitmap
+import android.graphics.Rect
 import kotlin.math.min
 
 /**
@@ -20,14 +21,23 @@ object SharpnessAnalyzer {
 
     private const val MAX_EDGE_PX = 240
 
-    /** Liefert die Laplace-Varianz von [bitmap] als Schaerfemass (hoeher = schaerfer). */
-    fun laplacianVariance(bitmap: Bitmap): Double {
-        val scaled = downscale(bitmap)
+    /**
+     * Liefert die Laplace-Varianz von [bitmap] als Schaerfemass (hoeher = schaerfer).
+     *
+     * @param cropRect optionaler Bildausschnitt in Bitmap-Pixelkoordinaten (z.B. der vom User
+     * im Live-Feed herangezoomte/ausgewaehlte Bereich, siehe [de.vif.bookscanner.hardware.UvcCameraBridge]
+     * setFocusRegion). Wird VOR dem Downscale angewendet und robust gegen die Bitmap-Grenzen
+     * geclampt. null = Vollbild (bisheriges Verhalten).
+     */
+    fun laplacianVariance(bitmap: Bitmap, cropRect: Rect? = null): Double {
+        val cropped = cropRect?.let { crop(bitmap, it) } ?: bitmap
+        val scaled = downscale(cropped)
         val gray = toGrayscale(scaled)
         val width = scaled.width
         val height = scaled.height
 
-        if (scaled !== bitmap) scaled.recycle()
+        if (scaled !== cropped) scaled.recycle()
+        if (cropped !== bitmap) cropped.recycle()
 
         if (width < 3 || height < 3) return 0.0
 
@@ -64,6 +74,20 @@ object SharpnessAnalyzer {
         if (reference <= 0.0) return true // noch nie kalibriert -> nichts zu vergleichen
         val lowerBound = reference * (1.0 - toleranceBandPercent / 100.0)
         return measured >= lowerBound
+    }
+
+    /** Schneidet [rect] aus [bitmap] aus, robust gegen Rechtecke die (teilweise) ausserhalb
+     * der Bitmap liegen — wird geclampt statt zu crashen. Liefert [bitmap] unveraendert
+     * zurueck falls das geclampte Rechteck degeneriert (Breite/Hoehe <= 0). */
+    private fun crop(bitmap: Bitmap, rect: Rect): Bitmap {
+        val left = rect.left.coerceIn(0, bitmap.width - 1)
+        val top = rect.top.coerceIn(0, bitmap.height - 1)
+        val right = rect.right.coerceIn(left + 1, bitmap.width)
+        val bottom = rect.bottom.coerceIn(top + 1, bitmap.height)
+        val w = right - left
+        val h = bottom - top
+        if (w <= 0 || h <= 0) return bitmap
+        return Bitmap.createBitmap(bitmap, left, top, w, h)
     }
 
     private fun downscale(bitmap: Bitmap): Bitmap {

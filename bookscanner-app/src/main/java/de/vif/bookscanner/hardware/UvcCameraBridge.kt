@@ -499,34 +499,41 @@ class UvcCameraBridge(
         // Mode-Switch ueberhaupt beginnt — siehe [quickPreviewFocusCheck].
         quickPreviewFocusCheck(camera)
 
+        // OPTIMIERUNG (User-Vorgabe 2026-07-21, "max 1s Warten + 1s Uebertragung"): KEINE
+        // blinden Fix-Delays mehr. Die frueheren zwei CAPTURE_SETTLE_DELAY_MS-Wartezeiten
+        // (zuletzt 2x 2000ms) waren Raten-Puffer aus der Zeit, als der Capture am naechsten
+        // TextureView-Frame hing. Seit dem Raw-Frame-Pfad (AbstractUVCCameraHandler#
+        // handleCaptureStill) sind sie architektonisch unnoetig, denn:
+        // 1. resize(), captureStill() und resize() zurueck sind MESSAGES an denselben
+        //    CameraThread — sie werden garantiert seriell in Reihenfolge abgearbeitet,
+        //    captureStill startet also erst, wenn der Mode-Switch komplett durch ist.
+        // 2. handleCaptureStill wartet EREIGNISBASIERT auf den ersten echten Frame des
+        //    neuen Streams (IFrameCallback, Timeout nur als Obergrenze) — genau die Zeit,
+        //    die die Hardware wirklich braucht, keine Millisekunde mehr.
+        // 3. Der Abschluss wird ueber eine vierte Message (handler.post) signalisiert, die
+        //    erst NACH dem Rueck-resize verarbeitet wird — onDone feuert damit exakt beim
+        //    echten Abschluss statt nach geratenem Timer.
+        // Verbleibende Gesamtzeit = echte Hardware-Zeit: Stream-Neustart + 1 Frame-Intervall
+        // (bei 4656x3496 sensorbedingt bis ~1,9s) + Stream-Neustart. Schneller geht es nur
+        // noch ueber die Kamera-Firmware selbst (hoehere Voll-Aufloesungs-Framerate).
         val (captureW, captureH) = captureSizeFor(camera)
+        val (previewW, previewH) = previewSizeFor(camera)
         try {
             handler.resize(captureW, captureH)
+            handler.captureStill(targetFile.absolutePath)
+            handler.resize(previewW, previewH)
         } catch (e: Exception) {
-            Log.w(TAG, "resize auf Capture-Aufloesung ${captureW}x$captureH fehlgeschlagen, capture mit aktueller Aufloesung", e)
+            listener.onError(camera, e)
         }
-
-        // Kurze Verzoegerung damit der native Mode-Switch (neues UVC-Streaming-Setup) greift,
-        // bevor der Still-Capture ausgeloest wird. Zeitwert ungetestet, mit echter Kamera pruefen.
-        mainHandler.postDelayed({
-            try {
-                handler.captureStill(targetFile.absolutePath)
-            } catch (e: Exception) {
-                listener.onError(camera, e)
-            }
-
-            mainHandler.postDelayed({
-                val (previewW, previewH) = previewSizeFor(camera)
-                try {
-                    handler.resize(previewW, previewH)
-                } catch (e: Exception) {
-                    Log.w(TAG, "resize zurueck auf Preview-Aufloesung ${previewW}x$previewH fehlgeschlagen", e)
-                }
+        // Vierte Message: laeuft auf dem CameraThread erst nach den drei obigen — sicherer
+        // "alles fertig"-Zeitpunkt, zurueck auf den Main-Thread fuer Verify + UI-Callback.
+        handler.post {
+            mainHandler.post {
                 applyManualControls(camera, controlPrefs.load(camera))
                 verifyFocusAfterCapture(camera, targetFile)
                 onDone()
-            }, CAPTURE_SETTLE_DELAY_MS)
-        }, CAPTURE_SETTLE_DELAY_MS)
+            }
+        }
     }
 
     /**

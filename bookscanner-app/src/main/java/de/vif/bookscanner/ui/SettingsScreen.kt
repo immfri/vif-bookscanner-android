@@ -24,6 +24,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
@@ -128,6 +129,11 @@ private fun LiveFeedPinchZoom(
     Box(
         modifier = modifier
             .background(Color.DarkGray)
+            // clipToBounds: ohne das malt die skalierte Vorschau (bis 10x) ueber die
+            // Box-Grenzen hinaus und ueberdeckt den ganzen Bildschirm inkl. Settings-Panel
+            // und Kamera-Auswahl-Leiste links (live beobachtet: 5x-Zoom fuellte den kompletten
+            // Screen statt nur die rechte Haelfte des Split-Layouts).
+            .clipToBounds()
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, zoom, _ ->
                     scale = (scale * zoom).coerceIn(1f, 10f)
@@ -145,7 +151,8 @@ private fun LiveFeedPinchZoom(
                 scaleX = scale,
                 scaleY = scale,
                 translationX = offsetX,
-                translationY = offsetY
+                translationY = offsetY,
+                clip = true
             )
         )
         Text(

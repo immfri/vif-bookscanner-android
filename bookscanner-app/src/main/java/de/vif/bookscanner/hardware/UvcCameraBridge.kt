@@ -593,11 +593,23 @@ class UvcCameraBridge(
      * Intervall (siehe Klassenkommentar), sondern echte Pro-Aufnahme-Verifikation.
      *
      * @param targetFile Zieldatei (Dateiname bereits via BookscanFileNamer gebaut).
-     * @param onDone Callback (Main-Thread) nach Abschluss des Mode-Switch-Zyklus.
+     * @param onImageSecured PARALLELITAETS-TEST 2026-07-21 (Main-Thread): feuert, sobald die
+     *   Bilddatei dieser Kamera vollstaendig geschrieben ist — noch VOR dem Reopen zurueck auf
+     *   Preview-Aufloesung. Ab hier braucht diese Kamera nur noch die niedrige Preview-
+     *   Bandbreite (~0.1-0.2), nicht mehr die volle Capture-Bandbreite (1.0). Der Aufrufer kann
+     *   deshalb an dieser Stelle sicher die NAECHSTE Kamera auf Capture-Aufloesung hochfahren
+     *   (volle Bandbreite 1.0), OHNE mit einem zweiten vollen 1.0-Stream zu kollidieren — das
+     *   waere physikalisch unmoeglich (siehe ScannerViewModel#start_capture-Kommentar zum
+     *   gemeinsamen USB2-Baum). Ungenutzt lassen (Default) verhaelt sich wie vorher rein
+     *   sequenziell.
+     * @param onDone Callback (Main-Thread) nach VOLLSTAENDIGEM Abschluss (inkl. Reopen-runter,
+     *   EXIF, Fokus-Verify) — Rundenabschluss/Buchhaltung muss an DIESES Callback haengen, nicht
+     *   an [onImageSecured].
      */
     fun captureFullResolutionThenReturnToPreview(
         camera: CameraSelection,
         targetFile: File,
+        onImageSecured: () -> Unit = {},
         onDone: () -> Unit
     ) {
         val handler = handlerFor(camera)
@@ -640,7 +652,9 @@ class UvcCameraBridge(
         // because a second close()/destroy() cycle crashed the app natively — that crash was
         // an unconditional DetachCurrentThread() in UVCButtonCallback/UVCStatusCallback and
         // is fixed at the source now, so the clean path is usable both ways.
+        val cycleStartMs = System.currentTimeMillis()
         reopenAtSize(camera, captureW, captureH) {
+            Log.i(TAG, "capture($camera): Reopen-hoch fertig, +${System.currentTimeMillis() - cycleStartMs}ms")
             try {
                 handler.captureStill(targetFile.absolutePath)
             } catch (e: Exception) {
@@ -650,10 +664,15 @@ class UvcCameraBridge(
             // "everything finished" point. Switch back down, then verify on the main thread.
             handler.post {
                 mainHandler.post {
+                    Log.i(TAG, "capture($camera): Bild gesichert, +${System.currentTimeMillis() - cycleStartMs}ms")
+                    // PARALLELITAETS-TEST 2026-07-21: image is safely on disk here, before the
+                    // reopen back down to preview even starts — see onImageSecured doc above.
+                    onImageSecured()
                     reopenAtSize(camera, previewW, previewH) {
                         applyManualControls(camera, controlPrefs.load(camera))
                         applyExifMetadata(camera, targetFile)
                         verifyFocusAfterCapture(camera, targetFile)
+                        Log.i(TAG, "capture($camera): komplett fertig (inkl. Reopen-runter+Verify), +${System.currentTimeMillis() - cycleStartMs}ms")
                         onDone()
                     }
                 }

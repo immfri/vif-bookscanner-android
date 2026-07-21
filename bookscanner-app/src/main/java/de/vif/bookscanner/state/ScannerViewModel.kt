@@ -49,9 +49,6 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     var activeCamera by mutableStateOf(CameraSelection.LEFT)
         private set
 
-    var orientation by mutableStateOf(PageOrientation.NORMAL)
-        private set
-
     /** 180-Grad-Rotation je Kamera (User-Vorgabe 2026-07-21): Kameras sind physisch nicht
      * per ID unterscheidbar und koennen kopfueber montiert sein. Wird auf Live-Vorschau
      * (View.rotation) und gespeicherte JPEGs (verlustfreies EXIF-Flag) angewandt;
@@ -341,11 +338,6 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             }
         }
         refreshCurrentControls()
-    }
-
-    /** Overlay-Control "Rotate 180°". */
-    fun set_orientation(newOrientation: PageOrientation = orientation.toggled()) {
-        orientation = newOrientation
     }
 
     /** Overlay-Control "Recalibrate". */

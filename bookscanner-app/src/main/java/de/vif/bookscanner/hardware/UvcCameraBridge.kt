@@ -834,14 +834,10 @@ class UvcCameraBridge(
      * Fokuswert nach dem lokal besten (schaerfsten) bekannten Kurvenpunkt. Faellt auf die
      * gesamte Kurve zurueck falls das Fenster leer ist. null falls noch nie ein Sweep lief.
      */
-    private fun correctFocusUsingCurve(controls: UvcControlSet): Int? {
-        if (controls.focusSweepCurve.isEmpty()) return null
-        val current = controls.focus
-        val window = controls.focusSweepCurve.filter {
-            kotlin.math.abs(it.first - current) <= FOCUS_LOCAL_SEARCH_WINDOW_PERCENT
-        }.ifEmpty { controls.focusSweepCurve }
-        return window.maxByOrNull { it.second }?.first
-    }
+    private fun correctFocusUsingCurve(controls: UvcControlSet): Int? =
+        de.vif.bookscanner.util.FocusCurveSearch.bestFocusNear(
+            controls.focusSweepCurve, controls.focus, FOCUS_LOCAL_SEARCH_WINDOW_PERCENT
+        )
 
     /**
      * Schnelle Vor-Aufnahme-Pruefung (Punkt 3, zweistufige Messung): misst die Schaerfe des

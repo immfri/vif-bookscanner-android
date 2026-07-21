@@ -8,10 +8,6 @@ enum class CameraSelection {
     fun other(): CameraSelection = if (this == LEFT) RIGHT else LEFT
 }
 
-/** Bild-Rotation der Buchvorlage — Vorgabe: Rotate-180-Grad-Toggle im Overlay. */
-enum class PageOrientation {
-    NORMAL,
-    ROTATED_180;
-
-    fun toggled(): PageOrientation = if (this == NORMAL) ROTATED_180 else NORMAL
-}
+// REFACTORING 2026-07-21: PageOrientation (globaler Rotate-180-Toggle) entfernt — ersetzt
+// durch die per-Kamera-Rotation (UvcControlPrefs.getRotation180/setRotation180, Live-View
+// via View.rotation + Datei via verlustfreiem EXIF-Orientation-Flag).

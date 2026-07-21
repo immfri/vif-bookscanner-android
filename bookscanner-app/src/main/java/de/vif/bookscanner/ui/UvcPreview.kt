@@ -14,6 +14,13 @@ import de.vif.bookscanner.state.ScannerViewModel
  * Kamera-Slot (L/R). Sobald die View erzeugt ist, meldet sie sich bei der Bridge an
  * ([UvcCameraBridge.bindCameraView]) — die Bridge oeffnet/startet die Vorschau, sobald
  * die passende USB-Kamera per USBMonitor verbunden wird (siehe onConnect in der Bridge).
+ *
+ * WICHTIG: `update` wird von Compose bei JEDER Rekomposition aufgerufen (bei einer
+ * TextureView, die pro eintreffendem Frame invalidiert, kann das mehrfach pro Sekunde
+ * sein) — startPreview() dort unbedingt aufzurufen war reine Verschwendung (natives
+ * `handleStartPreview` feuerte alle ~15ms). Native Seite hat zwar einen mIsPreviewing-
+ * Guard, aber das Muster ist trotzdem falsch: startPreview() gehoert genau EINMAL
+ * ausgeloest (onSurfaceCreated in der Bridge deckt das schon ab), nicht in update().
  */
 @Composable
 fun UvcPreview(
@@ -28,11 +35,6 @@ fun UvcPreview(
             UVCCameraTextureView(context).also { view ->
                 view.setAspectRatio(4.0 / 3.0)
                 cameraBridge.bindCameraView(camera, view)
-            }
-        },
-        update = {
-            if (cameraBridge.isOpened(camera)) {
-                cameraBridge.startPreview(camera)
             }
         }
     )

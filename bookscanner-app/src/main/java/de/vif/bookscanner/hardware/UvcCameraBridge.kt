@@ -27,8 +27,14 @@ import java.io.File
  */
 class UvcCameraBridge(
     private val activity: Activity,
-    private val previewWidth: Int = 320,
-    private val previewHeight: Int = 240,
+    // DEBUG-TEST 2026-07-21: 320x240 stand in der Spec (aus der RPi/V4L2-Doku uebernommen),
+    // aber die echte ArduCAM meldet laut UVC-Descriptor NUR 640x480 als kleinste unterstuetzte
+    // Groesse (MJPEG: 4656x3496...640x480, Uncompressed: 800x600/640x480) — 320x240 existiert
+    // in keiner der beiden Formatlisten. Testweise auf 640x480 gesetzt, um zu pruefen ob das
+    // der Grund fuer das leere Vorschaubild ist. TODO: sobald bestaetigt, gehoert das in die
+    // generische UVC-Settings-Architektur (dynamische Groessenwahl aus getSupportedSize()).
+    private val previewWidth: Int = 640,
+    private val previewHeight: Int = 480,
     private val listener: Listener
 ) {
 

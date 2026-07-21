@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- USB-Host fuer die zwei UVC-Kameras (ArduCAM IMX298). -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+
+    <!-- Scoped Storage / MediaStore: WRITE_EXTERNAL_STORAGE nur bis API 28 noetig, danach
+         uebernimmt MediaStore ohne Legacy-Permission (siehe Storage-Repository-Kommentar). -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@android:drawable/ic_menu_camera"
+        android:label="VIF Bookscanner"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:screenOrientation="landscape">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Automatischer Start beim Anstecken einer der beiden UVC-Kameras (spaeter befuellt,
+                 sobald der libuvccamera-Treiber steht). -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

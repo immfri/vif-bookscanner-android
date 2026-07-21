@@ -6,6 +6,9 @@ buildscript {
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:8.5.2'
+        // Nur fuer das neue Modul 'bookscanner-app' (Kotlin/Compose) benoetigt — additive Ergaenzung,
+        // beeinflusst die bestehenden Java-Module (usbCameraTest*, libuvccamera) nicht.
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24'
     }
 }
 

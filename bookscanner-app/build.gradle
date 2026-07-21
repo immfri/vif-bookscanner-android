@@ -1,0 +1,84 @@
+/*
+ * bookscanner-app
+ *
+ * Neues Gradle-Modul fuer den physischen Dual-Kamera-Buchscanner (Android-Portierung).
+ * Konzept: 04-projects/vif-bookscanner/android/plan-2026-07-21-android-portierung.md im Vault.
+ *
+ * WICHTIG: Dieses Modul haengt fachlich von ':libuvccamera' ab (UVC-Kamera-Treiber). Der Treiber
+ * wird aktuell in einem PARALLELEN Vorgang auf CMake umgestellt und ist ggf. noch nicht baubar.
+ * Deshalb ist die Dependency unten eingetragen, aber dieses Modul ist bewusst NICHT Teil eines
+ * verifizierten Gesamt-Builds in diesem Arbeitsschritt (siehe Statusbericht).
+ */
+
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'de.vif.bookscanner'
+    compileSdkVersion versionCompiler
+    buildToolsVersion versionBuildTool
+
+    defaultConfig {
+        applicationId 'de.vif.bookscanner'
+        minSdkVersion versionMinSdk
+        targetSdkVersion versionTarget
+        versionCode 1
+        versionName versionNameString
+
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    buildFeatures {
+        compose true
+    }
+
+    composeOptions {
+        // Kompatibel zu Kotlin 1.9.24 (siehe root build.gradle buildscript-Dependency).
+        kotlinCompilerExtensionVersion '1.5.14'
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['/META-INF/{AL2.0,LGPL2.1}']
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.4'
+    implementation 'androidx.activity:activity-compose:1.9.1'
+
+    implementation platform('androidx.compose:compose-bom:2024.06.00')
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.ui:ui-tooling-preview'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4'
+
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+
+    // Fachliche Abhaengigkeit zum UVC-Kamera-Treiber. Wird aktuell parallel auf CMake migriert —
+    // erst nutzbar sobald der andere Agent den Treiber-Build stabilisiert hat.
+    implementation project(':libuvccamera')
+
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.6.1'
+}

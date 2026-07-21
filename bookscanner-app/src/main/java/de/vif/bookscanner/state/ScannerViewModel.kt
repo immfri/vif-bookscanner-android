@@ -54,6 +54,11 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     var lastCapturedFile by mutableStateOf<File?>(null)
         private set
 
+    /** Alle in der letzten Doppelseiten-Aufnahme geschriebenen Dateien (L und/oder R) —
+     * fuer die RECHECK-Anzeige. [lastCapturedFile] bleibt als letzte Einzeldatei erhalten. */
+    var lastCapturedFiles by mutableStateOf<List<File>>(emptyList())
+        private set
+
     // --- Kalibrier-Architektur (Auto/Manuell, siehe CalibrationScreen) ---
 
     var calibrationMode by mutableStateOf(CalibrationMode.AUTO)
@@ -194,37 +199,59 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    /** Loest den Wechsel PREVIEW -> CAPTURE -> zurueck PREVIEW aus (1 Frame, volle Aufloesung). */
+    /**
+     * Loest die DOPPELSEITEN-Aufnahme aus (Kern-Workflow des Buchscanners): nimmt
+     * NACHEINANDER BEIDE verbundenen Kameras (LEFT dann RIGHT) in voller Aufloesung auf —
+     * eine Blaetterung = eine linke + eine rechte Buchseite. Sequenziell statt parallel,
+     * weil sich beide Kameras die USB2-Bandbreite teilen (bandwidthFactor 0.5) und ein
+     * gleichzeitiger Voll-Aufloesungs-Mode-Switch beider Streams die Bandbreite sprengt.
+     *
+     * Ist nur EINE Kamera verbunden (z.B. Einzelkamera-Betrieb/Test), wird nur diese
+     * aufgenommen — kein Fehler. Die Seitenzahl wird EINMAL pro Doppelseiten-Aufnahme
+     * inkrementiert (beide Dateien tragen dieselbe Seitennummer, unterschieden per _L/_R —
+     * Namensschema {Projekt}_S{Seite:04d}_{L|R}.jpg).
+     */
     fun start_capture() {
         if (state != ScannerState.PREVIEW) return
         if (captureInProgress) return
 
-        val bridge = cameraBridge
-        val fileName = BookscanFileNamer.buildFileName(
-            projectName = projectName,
-            pageNumber = pageNumber,
-            camera = activeCamera
-        )
-
-        if (bridge == null || !bridge.isOpened(activeCamera)) {
-            Log.w(TAG, "start_capture: Kamera $activeCamera nicht verbunden — Capture uebersprungen")
+        val bridge = cameraBridge ?: run {
+            Log.w(TAG, "start_capture: keine CameraBridge — Capture uebersprungen")
+            return
+        }
+        val connectedCameras = CameraSelection.entries.filter { bridge.isOpened(it) }
+        if (connectedCameras.isEmpty()) {
+            Log.w(TAG, "start_capture: keine Kamera verbunden — Capture uebersprungen")
             return
         }
 
         state = ScannerState.CAPTURE
         captureInProgress = true
+        val capturedThisRound = mutableListOf<File>()
 
-        // Pflicht-Mode-Switch auf volle Sensor-Aufloesung (USB2-Bandbreite erlaubt keinen
-        // simultanen Preview+Capture-High-Res), 1 Frame binaer schreiben (kein Decode/Encode
-        // im App-Code, das erledigt UVCCameraHandler#captureStill nativ), danach zurueck PREVIEW.
-        val targetFile = storageRepository.reserveCaptureFile(fileName)
-        bridge.captureFullResolutionThenReturnToPreview(activeCamera, targetFile) {
-            captureInProgress = false
-            storageRepository.publishCapturedFile(targetFile)
-            lastCapturedFile = targetFile
-            pageNumber += 1
-            state = ScannerState.RECHECK
+        fun captureAt(index: Int) {
+            if (index >= connectedCameras.size) {
+                captureInProgress = false
+                lastCapturedFiles = capturedThisRound.toList()
+                lastCapturedFile = capturedThisRound.lastOrNull()
+                pageNumber += 1
+                state = ScannerState.RECHECK
+                return
+            }
+            val camera = connectedCameras[index]
+            val fileName = BookscanFileNamer.buildFileName(
+                projectName = projectName,
+                pageNumber = pageNumber,
+                camera = camera
+            )
+            val targetFile = storageRepository.reserveCaptureFile(fileName)
+            bridge.captureFullResolutionThenReturnToPreview(camera, targetFile) {
+                storageRepository.publishCapturedFile(targetFile)
+                capturedThisRound.add(targetFile)
+                captureAt(index + 1)
+            }
         }
+        captureAt(0)
     }
 
     /** Nutzer bestaetigt die aufgenommene Seite in RECHECK -> zurueck PREVIEW fuer naechste Seite. */
@@ -260,8 +287,21 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         state = ScannerState.PREVIEW
     }
 
+    /** Setzt den Projektnamen (Datei-Namensschema {Projekt}_S{Seite:04d}_{L|R}.jpg).
+     * Ein NEUER Name startet ein neues Buch — Seitenzaehler springt zurueck auf 1.
+     * Leerer Name faellt auf den Default "buch" zurueck. */
     fun set_project_name(name: String) {
-        projectName = name
+        val sanitized = name.trim().ifBlank { "buch" }
+        if (sanitized != projectName) {
+            projectName = sanitized
+            pageNumber = 1
+        }
+    }
+
+    /** Manuelle Korrektur des Seitenzaehlers (z.B. nach verworfener Aufnahme oder beim
+     * Fortsetzen eines teilweise gescannten Buchs). Werte < 1 werden auf 1 geklemmt. */
+    fun set_page_number(page: Int) {
+        pageNumber = page.coerceAtLeast(1)
     }
 
     companion object {

@@ -38,8 +38,10 @@ fun LockScreen(viewModel: ScannerViewModel) {
 @Composable
 fun PreviewScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
     PlaceholderScaffold(
-        title = "Vorschau (PREVIEW, 320x240 MJPEG)",
-        description = "Live-Vorschau der aktiven Kamera (${viewModel.activeCamera})."
+        title = "Vorschau (PREVIEW)",
+        description = "Projekt \"${viewModel.projectName}\" — nächste Aufnahme: Seite " +
+            "%04d".format(viewModel.pageNumber) +
+            " (beide verbundenen Kameras L+R). Live-Bild: ${viewModel.activeCamera}."
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             UvcPreview(
@@ -80,12 +82,22 @@ fun CaptureScreen(viewModel: ScannerViewModel) {
 
 @Composable
 fun RecheckScreen(viewModel: ScannerViewModel) {
+    val files = viewModel.lastCapturedFiles
     PlaceholderScaffold(
         title = "Pruefung (RECHECK)",
-        description = "Zuletzt aufgenommene Datei: ${viewModel.lastCapturedFile?.absolutePath ?: "-"}"
+        description = if (files.isEmpty()) {
+            "Keine Aufnahmen in dieser Runde."
+        } else {
+            "Doppelseiten-Aufnahme abgeschlossen (${files.size} Datei(en)):"
+        }
     ) {
-        Button(onClick = { viewModel.confirm_and_next_page() }) {
-            Text("Next Page")
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            files.forEach { file ->
+                Text("${file.name}  (${file.length() / 1024} KB)")
+            }
+            Button(onClick = { viewModel.confirm_and_next_page() }) {
+                Text("Next Page")
+            }
         }
     }
 }

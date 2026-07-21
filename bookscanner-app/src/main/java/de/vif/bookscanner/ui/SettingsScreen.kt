@@ -106,6 +106,11 @@ fun SettingsScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text("Einstellungen", style = MaterialTheme.typography.titleMedium)
+
+                // Projekt/Buch-Verwaltung: Name geht 1:1 ins Dateinamensschema
+                // {Projekt}_S{Seite:04d}_{L|R}.jpg; neuer Name = neues Buch (Seite 1).
+                ProjectSettings(viewModel)
+
                 Text("Orientierung: ${viewModel.orientation}")
                 OutlinedButton(onClick = { viewModel.set_orientation() }) {
                     Text("Rotate 180°")
@@ -194,6 +199,35 @@ private fun LiveFeedPinchZoom(
         Text(
             text = "Zoom: ${"%.1f".format(scale)}x",
             color = Color.White
+        )
+    }
+}
+
+/**
+ * Projekt/Buch-Einstellungen: Projektname (Dateinamensschema) + Seitenzaehler mit
+ * manueller Korrekturmoeglichkeit (z.B. Fortsetzen eines halb gescannten Buchs).
+ */
+@Composable
+private fun ProjectSettings(viewModel: ScannerViewModel) {
+    var nameText by remember { mutableStateOf(viewModel.projectName) }
+    var pageText by remember(viewModel.pageNumber) { mutableStateOf(viewModel.pageNumber.toString()) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        OutlinedTextField(
+            value = nameText,
+            onValueChange = { input ->
+                nameText = input
+                viewModel.set_project_name(input)
+            },
+            label = { Text("Projekt / Buchname") }
+        )
+        OutlinedTextField(
+            value = pageText,
+            onValueChange = { input ->
+                pageText = input.filter { it.isDigit() }
+                pageText.toIntOrNull()?.let { viewModel.set_page_number(it) }
+            },
+            label = { Text("Nächste Seitennummer") }
         )
     }
 }

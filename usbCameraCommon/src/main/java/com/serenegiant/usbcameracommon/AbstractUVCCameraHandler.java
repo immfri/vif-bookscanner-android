@@ -26,7 +26,10 @@ package com.serenegiant.usbcameracommon;
 import android.app.Activity;
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.ImageFormat;
+import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
+import android.graphics.YuvImage;
 import android.hardware.usb.UsbDevice;
 import android.media.AudioManager;
 import android.media.MediaScannerConnection;
@@ -98,6 +101,8 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 	private static final int MSG_RESIZE = 10;
 	/** ERGAENZUNG (vif-bookscanner, 2026-07-21): Surface-Swap waehrend laufender Preview, siehe {@link #rebindSurface(Object)}. */
 	private static final int MSG_REBIND_SURFACE = 11;
+	/** ERGAENZUNG (vif-bookscanner, 2026-07-21): CameraView-Swap fuer den Still-Capture-Fallback, siehe {@link #rebindCameraView(CameraViewInterface)}. */
+	private static final int MSG_REBIND_CAMERA_VIEW = 12;
 
 	private final WeakReference<AbstractUVCCameraHandler.CameraThread> mWeakThread;
 	private volatile boolean mReleased;
@@ -233,6 +238,24 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 			throw new IllegalArgumentException("surface should be one of SurfaceHolder, Surface or SurfaceTexture");
 		}
 		sendMessage(obtainMessage(MSG_REBIND_SURFACE, surface));
+	}
+
+	/**
+	 * Aktualisiert die fuer {@link CameraThread#handleCaptureStill(String)} (TextureView-Bitmap-
+	 * Fallback) genutzte {@link CameraViewInterface} auf eine neue Instanz.
+	 * BUGFIX (vif-bookscanner, 2026-07-21, live am Geraet reproduziert): {@code mWeakCameraView}
+	 * wurde bisher EINMALIG im {@link CameraThread}-Konstruktor gesetzt und nie aktualisiert.
+	 * Da der Kamera-Handler ueber mehrere Compose-Screen-Wechsel hinweg offen bleibt (siehe
+	 * {@link #rebindSurface(Object)}-Kommentar zum selben Phaenomen bei der Preview-Surface),
+	 * hielt der Still-Capture-Fallback nach einem Screen-Wechsel eine tote/veraltete View-
+	 * Referenz — {@code captureStillImage()} lieferte dadurch null bzw. ein leeres Bild, die
+	 * Zieldatei blieb 0 Byte, OHNE dass das je als Exception/Log sichtbar wurde (nur ein
+	 * stiller {@code callOnError}-Toast). Aufrufer MUSS dies bei jedem Rebind der CameraView
+	 * (analog zu {@link #rebindSurface(Object)}) aufrufen, nicht nur beim allerersten Binden.
+	 */
+	public void rebindCameraView(final CameraViewInterface view) {
+		checkReleased();
+		sendMessage(obtainMessage(MSG_REBIND_CAMERA_VIEW, view));
 	}
 
 	protected void startPreview(final Object surface) {
@@ -504,6 +527,9 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 		case MSG_REBIND_SURFACE:
 			thread.handleRebindSurface(msg.obj);
 			break;
+		case MSG_REBIND_CAMERA_VIEW:
+			thread.handleRebindCameraView((CameraViewInterface)msg.obj);
+			break;
 		case MSG_RELEASE:
 			thread.handleRelease();
 			break;
@@ -517,7 +543,8 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 		private final Object mSync = new Object();
 		private final Class<? extends AbstractUVCCameraHandler> mHandlerClass;
 		private final WeakReference<Activity> mWeakParent;
-		private final WeakReference<CameraViewInterface> mWeakCameraView;
+		/** Nicht mehr final (BUGFIX vif-bookscanner 2026-07-21, siehe {@link AbstractUVCCameraHandler#rebindCameraView(CameraViewInterface)}) — muss bei jedem Screen-Wechsel aktualisierbar sein. */
+		private WeakReference<CameraViewInterface> mWeakCameraView;
 		private final int mEncoderType;
 		private final Set<CameraCallback> mCallbacks = new CopyOnWriteArraySet<CameraCallback>();
 		private int mWidth, mHeight, mPreviewMode;
@@ -778,6 +805,15 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 		}
 
 		/**
+		 * Ersetzt die fuer den Still-Capture-Fallback genutzte {@link CameraViewInterface}, siehe
+		 * {@link AbstractUVCCameraHandler#rebindCameraView(CameraViewInterface)}.
+		 */
+		public void handleRebindCameraView(final CameraViewInterface newView) {
+			if (DEBUG) Log.v(TAG_THREAD, "handleRebindCameraView:");
+			mWeakCameraView = new WeakReference<CameraViewInterface>(newView);
+		}
+
+		/**
 		 * Setzt {@link #mUVCCamera} auf die aktuell in {@link #mWidth}/{@link #mHeight} gesetzte
 		 * Groesse (mit YUV-Fallback wie in {@link #handleStartPreview(Object)}) und startet die
 		 * Preview bei Bedarf ({@code startPreviewAfter}) auf der zwischengespeicherten
@@ -839,13 +875,16 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 		 * und lief reproduzierbar in ihren Timeout. Der Erfolgslauf von 12:44 war Timing-
 		 * Glueck (Surface ueberlebte den resize dort).
 		 *
-		 * PRIMAERWEG (Raw): {@link UVCCamera#setFrameCallback(IFrameCallback, int)} mit
-		 * {@link UVCCamera#PIXEL_FORMAT_RAW} — haengt am nativen UVC-Stream selbst, NICHT an
-		 * der (potentiell toten) Display-Surface, und liefert bei MJPEG-Streamformat die
-		 * rohen JPEG-Bytes 1:1 aus dem USB-Transfer (User-Anforderung: Sensor-Output
-		 * unveraendert ablegen, keine Dekodierung/Rekompression). Der fruehere Fehlschlag
-		 * dieses Wegs (13:52) fiel exakt mit der toten Surface zusammen — ob der native
-		 * Stream dort noch lief, ist unklar, deshalb:
+		 * PRIMAERWEG (NV21): {@link UVCCamera#setFrameCallback(IFrameCallback, int)} mit
+		 * {@link UVCCamera#PIXEL_FORMAT_NV21} — haengt am nativen UVC-Stream selbst, NICHT an
+		 * der (potentiell toten) Display-Surface. KORREKTUR 2026-07-21 (live per Hex-Dump
+		 * verifiziert): urspruenglich wurde hier {@code PIXEL_FORMAT_RAW} verwendet in der
+		 * Annahme, das lieferte bei MJPEG-Streamformat die komprimierten JPEG-Bytes 1:1 — ein
+		 * Hex-Dump einer so geschriebenen Datei zeigte aber KEINEN JPEG-Header, sondern exakt
+		 * width*height*2 Byte unkomprimierte Rohpixel, die als ".jpg" garantiert undekodierbar
+		 * waren (auch wenn der Callback erfolgreich feuerte). Jetzt: NV21-Bytes anfordern und
+		 * ueber {@link YuvImage#compressToJpeg} explizit zu einem echten JPEG kodieren, siehe
+		 * {@link #captureRawFrameToFile(File)}.
 		 *
 		 * FALLBACK (Bitmap): kommt innerhalb {@link #RAW_CAPTURE_TIMEOUT_MS} kein roher
 		 * Frame, wird einmalig der alte TextureView-Weg versucht (Bitmap-Readback + JPEG
@@ -864,14 +903,27 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 				: new File(path);
 
 			if (captureRawFrameToFile(outputFile)) {
-				Log.i(TAG_THREAD, "handleCaptureStill: roher MJPEG-Frame 1:1 gespeichert (" + outputFile.length() + " Bytes)");
+				Log.i(TAG_THREAD, "handleCaptureStill: NV21-Frame zu JPEG kodiert gespeichert (" + outputFile.length() + " Bytes)");
 				mHandler.sendMessage(mHandler.obtainMessage(MSG_MEDIA_UPDATE, outputFile.getPath()));
 				return;
 			}
 
 			Log.w(TAG_THREAD, "handleCaptureStill: Raw-Frame-Pfad lieferte keinen Frame, Fallback auf TextureView-Bitmap");
 			try {
-				final Bitmap bitmap = mWeakCameraView.get().captureStillImage();
+				final CameraViewInterface cameraView = mWeakCameraView.get();
+				if (cameraView == null) {
+					// BUGFIX (vif-bookscanner, 2026-07-21): vorher NPE hier, von der aeusseren
+					// catch(Exception) stumm als callOnError() ohne jedes Log verschluckt —
+					// dadurch war die 0-Byte-Datei nie im Logcat sichtbar. Siehe
+					// AbstractUVCCameraHandler#rebindCameraView fuer den eigentlichen Fix
+					// (View wird jetzt bei jedem Screen-Wechsel aktualisiert); dieser Check
+					// bleibt als klar geloggtes Sicherheitsnetz, falls der Aufrufer den Rebind
+					// vergisst.
+					Log.w(TAG_THREAD, "handleCaptureStill: mWeakCameraView.get() ist null (View nicht (mehr) gebunden)");
+					callOnError(new IllegalStateException("handleCaptureStill: keine CameraView fuer Fallback gebunden"));
+					return;
+				}
+				final Bitmap bitmap = cameraView.captureStillImage();
 				if (bitmap == null) {
 					callOnError(new IllegalStateException("handleCaptureStill: weder roher Frame noch TextureView-Bild erhalten (Timeout)"));
 					return;
@@ -895,14 +947,27 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 		}
 
 		/**
-		 * Greift genau EINEN rohen Frame vom nativen UVC-Stream ab und schreibt ihn
-		 * byte-identisch in {@code outputFile}. Liefert false bei Timeout/Fehler (Datei dann
-		 * ggf. geloescht) — Aufrufer entscheidet ueber den Fallback. Siehe
-		 * {@link #handleCaptureStill(String)} fuer die Architektur-Begruendung.
+		 * Greift genau EINEN Frame vom nativen UVC-Stream ab und kodiert ihn als echtes JPEG
+		 * nach {@code outputFile}. Liefert false bei Timeout/Fehler (Datei dann ggf. geloescht)
+		 * — Aufrufer entscheidet ueber den Fallback. Siehe {@link #handleCaptureStill(String)}
+		 * fuer die Architektur-Begruendung.
+		 *
+		 * BUGFIX (vif-bookscanner, 2026-07-21, live am Geraet reproduziert und per Hex-Dump
+		 * verifiziert): vorher wurde mit {@code PIXEL_FORMAT_RAW} anggefordert und angenommen,
+		 * das lieferte bei einem MJPEG-Stream die komprimierten JPEG-Bytes 1:1 (so der
+		 * urspruengliche Architektur-Kommentar). Ein direkter Hex-Dump einer so geschriebenen
+		 * "*.jpg"-Datei zeigte aber: KEIN JPEG-Header ({@code FF D8 FF}), stattdessen exakt
+		 * width*height*2 Byte roher, unkomprimierter Pixeldaten — jede so erzeugte Datei war
+		 * daher garantiert undekodierbar, auch wenn der Callback erfolgreich feuerte. Fix:
+		 * {@code PIXEL_FORMAT_NV21} anfordern (dokumentiertes, dekodierbares YUV420SP-Format)
+		 * und ueber {@link YuvImage#compressToJpeg} explizit zu einem ECHTEN JPEG kodieren,
+		 * statt Rohbytes blind durchzureichen.
 		 */
 		private boolean captureRawFrameToFile(final File outputFile) {
 			if (mUVCCamera == null) return false;
 			final boolean[] written = new boolean[1];
+			final int width = mWidth;
+			final int height = mHeight;
 			final IFrameCallback rawFrameCallback = new IFrameCallback() {
 				@Override
 				public void onFrame(final ByteBuffer frame) {
@@ -911,18 +976,21 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 						try {
 							final ByteBuffer readOnly = frame.asReadOnlyBuffer();
 							readOnly.rewind();
-							final byte[] bytes = new byte[readOnly.remaining()];
-							readOnly.get(bytes);
+							final byte[] nv21 = new byte[readOnly.remaining()];
+							readOnly.get(nv21);
+							final YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, width, height, null);
 							final BufferedOutputStream os = new BufferedOutputStream(new FileOutputStream(outputFile));
 							try {
-								os.write(bytes);
+								if (!yuvImage.compressToJpeg(new Rect(0, 0, width, height), 100, os)) {
+									throw new java.io.IOException("YuvImage.compressToJpeg lieferte false");
+								}
 								os.flush();
 							} finally {
 								os.close();
 							}
 							written[0] = true;
 						} catch (final Exception e) {
-							Log.w(TAG_THREAD, "captureRawFrameToFile: Schreiben des rohen Frames fehlgeschlagen", e);
+							Log.w(TAG_THREAD, "captureRawFrameToFile: NV21->JPEG-Kodierung fehlgeschlagen", e);
 						} finally {
 							mRawCaptureSync.notifyAll();
 						}
@@ -932,7 +1000,7 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 
 			synchronized (mRawCaptureSync) {
 				try {
-					mUVCCamera.setFrameCallback(rawFrameCallback, UVCCamera.PIXEL_FORMAT_RAW);
+					mUVCCamera.setFrameCallback(rawFrameCallback, UVCCamera.PIXEL_FORMAT_NV21);
 				} catch (final Exception e) {
 					Log.w(TAG_THREAD, "captureRawFrameToFile: setFrameCallback fehlgeschlagen", e);
 					return false;

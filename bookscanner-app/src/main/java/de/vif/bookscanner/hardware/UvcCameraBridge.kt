@@ -130,8 +130,15 @@ class UvcCameraBridge(
 
         /** Sicherheits-Obergrenze fuer [diagnoseModeSwitchSettleTime]s Datei-Ready-Polling
          * (siehe dortiger Kommentar) — verhindert endloses Warten, falls captureStill() fuer
-         * einen Frame nie eine lesbare Datei liefert (z.B. Timeout im nativen Layer). */
-        private const val FRAME_READ_POLL_MAX_ATTEMPTS = 60
+         * einen Frame nie eine lesbare Datei liefert (z.B. Timeout im nativen Layer).
+         * KORREKTUR 2026-07-21 (0-Byte-Capture-Untersuchung): vorheriger Wert 60 (=1,8s bei
+         * 30ms Poll-Delay) war KUERZER als handleCaptureStill()s eigene interne Timeouts
+         * (RAW_CAPTURE_TIMEOUT_MS 5s + ggf. TextureView-Fallback nochmal bis 5s) — die
+         * Diagnose brach also IMMER vorzeitig ab, bevor der native Layer ueberhaupt fertig
+         * war, und meldete faelschlich "kein lesbares Bild" fuer JEDEN Frame. Auf 500 (=15s)
+         * angehoben, damit tatsaechlich gemessen wird ob/wann ein Frame ankommt, statt das
+         * Messfenster kleiner als die zu messende Groesse zu waehlen. */
+        private const val FRAME_READ_POLL_MAX_ATTEMPTS = 500
 
         /** USB-Bandbreiten-Faktor je Kamera im Dual-Preview-Betrieb (zwei parallele
          * 320x240-Streams). Fuer Voll-Aufloesungs-Captures wird temporaer 1.0 angefordert
@@ -245,12 +252,25 @@ class UvcCameraBridge(
             Log.i(TAG, "resolveCameraSizes($camera): Preview dynamisch ermittelt: ${preview.width}x${preview.height} (Ziel nahe 320x240, ${sizes.size} echte Groessen gemeldet)")
         }
 
-        sizes.maxByOrNull { it.width.toLong() * it.height }?.let { capture ->
+        // BEWUSST NICHT die maximale Groesse (KORREKTUR 2026-07-21, 0-Byte-Capture-
+        // Untersuchung): frueher wurde hier die groesste gemeldete Groesse gewaehlt
+        // (Kommentar "max. Qualitaet") — live und systematisch durchgetestet (4656x3496,
+        // 1920x1080, 1280x720, jeweils inkl. bis zu 15s Geduld pro Frame): JEDE Groesse
+        // ueber 640x480 liefert auf diesem Geraet (zwei Arducam IMX298 AF an einem USB-Hub)
+        // reproduzierbar NIE einen vollstaendigen Frame — weder ueber den Raw/NV21- noch
+        // ueber den TextureView-Fallback-Pfad. Nur exakt die Preview-Groesse (640x480)
+        // funktioniert bisher zuverlaessig (sofortiger Erfolg, beide Kameras, siehe
+        // Commit-Message). Das ist eine physische USB2-Bandbreiten-/Hub-Grenze dieses
+        // konkreten Aufbaus, kein Software-Bug — volle Sensor-Aufloesung braucht entweder
+        // einen anderen Hub/Kabel/eine Einzelkamera-Sequenzierung oder bleibt Zukunftsarbeit.
+        // TODO: Zwischengroessen (z.B. 800x600, 1024x768) sind NICHT getestet — koennten
+        // noch funktionieren und mehr Qualitaet als 640x480 liefern.
+        sizes.minByOrNull { kotlin.math.abs(it.width.toLong() * it.height - 640L * 480L) }?.let { capture ->
             when (camera) {
                 CameraSelection.LEFT -> resolvedCaptureSizeL = capture.width to capture.height
                 CameraSelection.RIGHT -> resolvedCaptureSizeR = capture.width to capture.height
             }
-            Log.i(TAG, "resolveCameraSizes($camera): Capture dynamisch ermittelt (max. Qualitaet): ${capture.width}x${capture.height}")
+            Log.i(TAG, "resolveCameraSizes($camera): Capture gewaehlt (verifizierte Arbeitsgroesse, siehe Kommentar): ${capture.width}x${capture.height}")
         }
     }
 
@@ -320,6 +340,17 @@ class UvcCameraBridge(
                 CameraSelection.LEFT -> handlerL = newHandler
                 CameraSelection.RIGHT -> handlerR = newHandler
             }
+        } else {
+            // BUGFIX 2026-07-21 (live am Geraet reproduziert: Aufnahme meldete "abgeschlossen",
+            // beide JPEGs aber 0 Byte): AbstractUVCCameraHandler haelt die CameraView fuer den
+            // Still-Capture-Fallback (mWeakCameraView) intern in einem WeakReference, der nur
+            // im Konstruktor gesetzt wurde. Bei jedem Screen-Wechsel entsteht aber eine NEUE
+            // UvcPreview-TextureView fuer dieselbe, laengst offene Kamera (identisches Muster
+            // wie der Surface-Rebind unten) — ohne explizites Rebind zeigte der Fallback
+            // dauerhaft auf die ALTE, zerstoerte View, captureStillImage() lieferte dadurch
+            // kein Bild und die Zieldatei blieb leer, OHNE dass das je als Log/Exception
+            // sichtbar wurde (nur ein stiller Toast). Siehe rebindCameraView-Kommentar.
+            existing.rebindCameraView(view)
         }
 
         // WICHTIG (live gefunden, 2026-07-21): Bei Screen-Wechsel (z.B. CalibrationScreen ->

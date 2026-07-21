@@ -22,12 +22,11 @@ apply plugin: 'com.android.library'
  *  may have a different license, see the respective files.
  */
 
-import org.apache.tools.ant.taskdefs.condition.Os
-
 android {
 	namespace 'com.serenegiant.uvccamera'
 	compileSdkVersion versionCompiler
 	buildToolsVersion versionBuildTool
+	ndkVersion '27.0.12077973'
 
 	compileOptions {
 		sourceCompatibility javaSourceCompatibility
@@ -37,7 +36,29 @@ android {
     defaultConfig {
         minSdkVersion versionMinSdk
 		targetSdkVersion versionTarget
+
+		// Migration von ndk-build/Android.mk auf CMake (2026-07-21): NDK r18+ hat
+		// GCC entfernt (nur noch Clang) und gnustl/stlport gestrichen — einzig
+		// erlaubte STL-Wahl ist jetzt c++_shared/c++_static/none. Alte Config
+		// hatte keine explizite APP_STL, was unter aktuellem NDK nicht mehr
+		// funktioniert; c++_shared ist der empfohlene Ersatz.
+		externalNativeBuild {
+			cmake {
+				arguments '-DANDROID_STL=c++_shared'
+				cppFlags ''
+				abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+			}
+		}
     }
+
+	// src/main/jni/CMakeLists.txt bildet die vier alten Android.mk-Module
+	// (jpeg-turbo1500, usb100, uvc, UVCCamera) 1:1 nach.
+	externalNativeBuild {
+		cmake {
+			path 'src/main/jni/CMakeLists.txt'
+			version '3.22.1'
+		}
+	}
 
     buildTypes {
         release {
@@ -47,42 +68,10 @@ android {
     }
 	sourceSets {
 		main {
-			jniLibs.srcDir 'src/main/libs'
 			jni.srcDirs = []
 		}
 	}
 }
-
-tasks.withType(JavaCompile) {
-	compileTask -> compileTask.dependsOn ndkBuild
-}
-
-String getNdkBuildPath() {
-	Properties properties = new Properties()
-	properties.load(project.rootProject.file('local.properties').newDataInputStream())
-	def ndkBuildingDir = properties.getProperty("ndk.dir")
-	def ndkBuildPath = ndkBuildingDir
-	if (Os.isFamily(Os.FAMILY_WINDOWS)) {
-		ndkBuildPath = ndkBuildingDir + '/ndk-build.cmd'
-	} else {
-		ndkBuildPath = ndkBuildingDir + '/ndk-build'
-	}
-	return ndkBuildPath
-}
-
-task ndkBuild(type: Exec, description: 'Compile JNI source via NDK') {
-	println('executing ndkBuild')
-	def ndkBuildPath = getNdkBuildPath();
-	commandLine ndkBuildPath, '-j8', '-C', file('src/main').absolutePath
-}
-
-task ndkClean(type: Exec, description: 'clean JNI libraries') {
-	println('executing ndkBuild clean')
-	def ndkBuildPath = getNdkBuildPath();
-	commandLine ndkBuildPath, 'clean', '-C', file('src/main').absolutePath
-}
-
-clean.dependsOn 'ndkClean'
 
 dependencies {
     implementation fileTree(dir: new File(buildDir, 'libs'), include: '*.jar')

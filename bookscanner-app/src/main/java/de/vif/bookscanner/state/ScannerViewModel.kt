@@ -122,6 +122,20 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /** Debug-Diagnose (Plan Punkt 4): stoesst [UvcCameraBridge.diagnoseModeSwitchSettleTime]
+     * fuer die aktive Kamera an — loggt Schaerfe+Zeitstempel pro Frame nach dem Moduswechsel,
+     * um den echten minimalen CAPTURE_SETTLE_DELAY_MS-Wert empirisch zu bestimmen statt zu
+     * raten. Ergebnis wird nur ins Logcat geschrieben (kein UI-Feedback noetig, User wertet
+     * das Log beim naechsten Live-Test aus). */
+    fun run_settle_diagnosis() {
+        val bridge = cameraBridge ?: return
+        if (!bridge.isOpened(activeCamera)) {
+            Log.w(TAG, "run_settle_diagnosis: Kamera $activeCamera nicht verbunden")
+            return
+        }
+        bridge.diagnoseModeSwitchSettleTime(activeCamera)
+    }
+
     /** Manueller Modus: einzelner Slider-Wert geaendert -> sofort live auf den Treiber
      * schreiben (Vorgabe: sofortige Anzeige im Live-Feed) + persistieren. */
     fun update_manual_control(updated: UvcControlSet) {

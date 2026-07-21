@@ -83,7 +83,21 @@ private fun AutoCalibrationSection(viewModel: ScannerViewModel) {
         }
         val referenceSharpness = viewModel.currentControls.referenceSharpness
         if (referenceSharpness > 0.0) {
-            Text("Referenz-Schärfe: ${"%.1f".format(referenceSharpness)}")
+            Text("Referenz-Schärfe (Vollauflösung): ${"%.1f".format(referenceSharpness)}")
+        }
+        val referenceSharpnessPreview = viewModel.currentControls.referenceSharpnessPreview
+        if (referenceSharpnessPreview > 0.0) {
+            Text("Referenz-Schärfe (Preview): ${"%.1f".format(referenceSharpnessPreview)}")
+        }
+        val sweepPoints = viewModel.currentControls.focusSweepCurve.size
+        if (sweepPoints > 0) {
+            Text("Fokus-Sweep-Kurve: $sweepPoints Messpunkte", style = MaterialTheme.typography.bodySmall)
+        }
+
+        // Debug-Diagnose (Plan Punkt 4): kein Teil des normalen Kalibrier-Flows, nur Logcat-
+        // Ausgabe fuer die empirische Ermittlung des minimal noetigen Moduswechsel-Settle-Werts.
+        OutlinedButton(onClick = { viewModel.run_settle_diagnosis() }) {
+            Text("Debug: Moduswechsel-Settle-Zeit messen (Logcat)")
         }
     }
 }

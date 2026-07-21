@@ -2,10 +2,12 @@ package de.vif.bookscanner.storage
 
 import android.content.ContentValues
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import java.io.File
 import java.io.OutputStream
 
 /**
@@ -23,6 +25,36 @@ class ScanStorageRepository(private val context: Context) {
 
     /** Unterordner unterhalb von Pictures/, in dem alle Scans landen. */
     private val relativeSubfolder = "VifBookscanner"
+
+    /**
+     * Reserviert eine Ziel-Datei fuer [de.vif.bookscanner.hardware.UvcCameraBridge]#captureStill.
+     *
+     * UVCCameraHandler#captureStill(path) schreibt die JPEG-Bytes des Kamera-Treibers selbst
+     * direkt auf einen Dateipfad (kein manuelles Decode/Encode im App-Code) — dafuer braucht es
+     * einen echten File-Pfad statt eines MediaStore-Uri/OutputStream. App-eigener externer
+     * Speicher (getExternalFilesDir) ist ab API 29 ohne Extra-Berechtigung beschreibbar und
+     * braucht keine Scoped-Storage-Klammer (IS_PENDING) fuer den Schreibvorgang selbst.
+     */
+    fun reserveCaptureFile(fileName: String): File {
+        val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES), relativeSubfolder)
+        if (!dir.exists()) dir.mkdirs()
+        return File(dir, fileName)
+    }
+
+    /**
+     * Macht eine per [reserveCaptureFile] geschriebene Datei im normalen Android-Datei-Browser
+     * sichtbar (Vorgabe: kein SSH/Remote noetig). MediaScannerConnection triggert einen
+     * MediaStore-Reindex, ohne die Bytes erneut zu lesen/zu kopieren.
+     */
+    fun publishCapturedFile(file: File) {
+        if (!file.exists()) return
+        MediaScannerConnection.scanFile(
+            context,
+            arrayOf(file.absolutePath),
+            arrayOf("image/jpeg"),
+            null
+        )
+    }
 
     /**
      * Schreibt die rohen MJPEG-Bytes eines einzelnen Frames binaer in eine neue Bilddatei.

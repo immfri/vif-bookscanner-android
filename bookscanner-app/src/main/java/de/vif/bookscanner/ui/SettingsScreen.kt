@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.weight
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -28,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
+import de.vif.bookscanner.hardware.UvcCameraBridge
 import de.vif.bookscanner.state.CameraSelection
 import de.vif.bookscanner.state.ScannerViewModel
 
@@ -35,13 +35,11 @@ import de.vif.bookscanner.state.ScannerViewModel
  * Settings-Screen gemaess genauer Vorgabe (vif-bookscanner-gui-layer.md):
  * - Oben: Kamera-Auswahl-Dropdown + Switch-Button (KEINE zwei Tabs L/R).
  * - Darunter: Split-Layout — Einstellungen links, Live-Feed rechts.
- * - Live-Feed in Capture-Aufloesung mit Pinch-Zoom (Default 5x, Bildmitte) + 1-Finger-Pan.
- *
- * TODO(libuvccamera): den Mock-Preview-Block unten rechts durch den echten Live-Frame-Stream
- * der aktuell ausgewaehlten Kamera ersetzen, sobald der Treiber-Fix steht.
+ * - Live-Feed mit Pinch-Zoom (Default 5x, Bildmitte) + 1-Finger-Pan ueber der echten
+ *   UVC-Kamera-Vorschau ([UvcPreview]) der aktuell ausgewaehlten Kamera.
  */
 @Composable
-fun SettingsScreen(viewModel: ScannerViewModel) {
+fun SettingsScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
     var dropdownExpanded by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -100,6 +98,9 @@ fun SettingsScreen(viewModel: ScannerViewModel) {
             }
 
             LiveFeedPinchZoom(
+                camera = viewModel.activeCamera,
+                cameraBridge = cameraBridge,
+                viewModel = viewModel,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
@@ -109,11 +110,16 @@ fun SettingsScreen(viewModel: ScannerViewModel) {
 }
 
 /**
- * Mock-Live-Feed mit Pinch-Zoom (Default 5x, zentriert auf die Bildmitte) und 1-Finger-Pan.
- * Ersetzt eine echte Kamera-Textur nur durch eine farbige Flaeche, bis der UVC-Treiber steht.
+ * Echte UVC-Kamera-Vorschau ([UvcPreview]) mit Pinch-Zoom (Default 5x, zentriert auf die
+ * Bildmitte) und 1-Finger-Pan via graphicsLayer-Transform auf der TextureView selbst.
  */
 @Composable
-private fun LiveFeedPinchZoom(modifier: Modifier = Modifier) {
+private fun LiveFeedPinchZoom(
+    camera: CameraSelection,
+    cameraBridge: UvcCameraBridge,
+    viewModel: ScannerViewModel,
+    modifier: Modifier = Modifier
+) {
     val defaultZoom = 5f
     var scale by remember { mutableStateOf(defaultZoom) }
     var offsetX by remember { mutableStateOf(0f) }
@@ -131,15 +137,20 @@ private fun LiveFeedPinchZoom(modifier: Modifier = Modifier) {
             },
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            text = "Live-Feed (Capture-Aufloesung, Mock)\nZoom: ${"%.1f".format(scale)}x",
-            color = Color.White,
+        UvcPreview(
+            camera = camera,
+            cameraBridge = cameraBridge,
+            viewModel = viewModel,
             modifier = Modifier.graphicsLayer(
                 scaleX = scale,
                 scaleY = scale,
                 translationX = offsetX,
                 translationY = offsetY
             )
+        )
+        Text(
+            text = "Zoom: ${"%.1f".format(scale)}x",
+            color = Color.White
         )
     }
 }

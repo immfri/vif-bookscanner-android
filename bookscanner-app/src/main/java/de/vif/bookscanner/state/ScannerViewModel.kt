@@ -1,20 +1,30 @@
 package de.vif.bookscanner.state
 
+import android.app.Application
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
+import de.vif.bookscanner.hardware.UvcCameraBridge
+import de.vif.bookscanner.storage.ScanStorageRepository
 import de.vif.bookscanner.util.BookscanFileNamer
+import java.io.File
 
 /**
  * Zentrales ViewModel der Buchscanner-App.
  *
  * Kapselt die 6-Zustaende-State-Machine (siehe [ScannerState]) und die Events aus der
- * GUI-Doku (vif-bookscanner-gui-layer.md). Die eigentliche Kamera-Anbindung (libuvccamera)
- * ist an dieser Stelle bewusst noch NICHT verdrahtet — TODO-Marker zeigen, wo sie reinkommt,
- * sobald der Treiber-Fix (paralleler Vorgang) steht.
+ * GUI-Doku (vif-bookscanner-gui-layer.md). Die echte Kamera-Anbindung erfolgt ueber
+ * [UvcCameraBridge], die von [de.vif.bookscanner.MainActivity] gesetzt wird (USBMonitor
+ * braucht eine Activity, nicht nur Application-Context).
  */
-class ScannerViewModel : ViewModel() {
+class ScannerViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val storageRepository = ScanStorageRepository(application)
+
+    /** Wird von MainActivity.onCreate gesetzt, sobald die Activity + Compose-Views bereit sind. */
+    var cameraBridge: UvcCameraBridge? = null
 
     var state by mutableStateOf(ScannerState.CALIBRATION)
         private set
@@ -31,27 +41,52 @@ class ScannerViewModel : ViewModel() {
     var pageNumber by mutableStateOf(1)
         private set
 
+    /** true waehrend des Capture-Mode-Switch, blockiert Doppel-Ausloesung. */
+    var captureInProgress by mutableStateOf(false)
+        private set
+
+    var lastCapturedFile by mutableStateOf<File?>(null)
+        private set
+
     /** Startet die Kalibrierung, danach automatisch LOCK (Vorgabe State-Machine). */
     fun start_calibration() {
         state = ScannerState.CALIBRATION
-        // TODO(libuvccamera): beide Kameras oeffnen, Belichtung/Weissabgleich angleichen.
+        // Kameras oeffnen sich automatisch ueber UvcCameraBridge.onConnect (USBMonitor-Callback),
+        // sobald sie am Geraet angeschlossen werden. Belichtung/Weissabgleich-Angleichung ist
+        // ueber die UVCCamera-Value-APIs (setValue/getValue) moeglich, aber noch nicht verdrahtet.
     }
 
     /** Loest den Wechsel PREVIEW -> CAPTURE -> zurueck PREVIEW aus (1 Frame, volle Aufloesung). */
     fun start_capture() {
         if (state != ScannerState.PREVIEW) return
-        state = ScannerState.CAPTURE
-        // TODO(libuvccamera): Pflicht-Mode-Switch auf volle Sensor-Aufloesung (USB2-Bandbreite
-        // erlaubt keinen simultanen Preview+Capture-High-Res), 1 Frame binaer schreiben
-        // (kein Decode/Encode), Dateiname via BookscanFileNamer, danach zurueck PREVIEW.
+        if (captureInProgress) return
+
+        val bridge = cameraBridge
         val fileName = BookscanFileNamer.buildFileName(
             projectName = projectName,
             pageNumber = pageNumber,
             camera = activeCamera
         )
-        // TODO(storage): fileName an das StorageRepository uebergeben.
-        pageNumber += 1
-        state = ScannerState.RECHECK
+
+        if (bridge == null || !bridge.isOpened(activeCamera)) {
+            Log.w(TAG, "start_capture: Kamera $activeCamera nicht verbunden — Capture uebersprungen")
+            return
+        }
+
+        state = ScannerState.CAPTURE
+        captureInProgress = true
+
+        // Pflicht-Mode-Switch auf volle Sensor-Aufloesung (USB2-Bandbreite erlaubt keinen
+        // simultanen Preview+Capture-High-Res), 1 Frame binaer schreiben (kein Decode/Encode
+        // im App-Code, das erledigt UVCCameraHandler#captureStill nativ), danach zurueck PREVIEW.
+        val targetFile = storageRepository.reserveCaptureFile(fileName)
+        bridge.captureFullResolutionThenReturnToPreview(activeCamera, targetFile) {
+            captureInProgress = false
+            storageRepository.publishCapturedFile(targetFile)
+            lastCapturedFile = targetFile
+            pageNumber += 1
+            state = ScannerState.RECHECK
+        }
     }
 
     /** Nutzer bestaetigt die aufgenommene Seite in RECHECK -> zurueck PREVIEW fuer naechste Seite. */
@@ -63,7 +98,11 @@ class ScannerViewModel : ViewModel() {
     /** Overlay-Control "Swap Cameras". */
     fun swap_cameras() {
         activeCamera = activeCamera.other()
-        // TODO(libuvccamera): aktiven Stream auf die jeweils andere Kamera umschalten.
+        cameraBridge?.let { bridge ->
+            if (bridge.isOpened(activeCamera)) {
+                bridge.startPreview(activeCamera)
+            }
+        }
     }
 
     /** Overlay-Control "Rotate 180°". */
@@ -83,5 +122,9 @@ class ScannerViewModel : ViewModel() {
 
     fun set_project_name(name: String) {
         projectName = name
+    }
+
+    companion object {
+        private const val TAG = "ScannerViewModel"
     }
 }

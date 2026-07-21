@@ -3,6 +3,8 @@ package de.vif.bookscanner.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
@@ -10,11 +12,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import de.vif.bookscanner.hardware.UvcCameraBridge
 import de.vif.bookscanner.state.ScannerViewModel
 
 /**
- * Platzhalter-Screens fuer die 6 State-Machine-Zustaende. Reine UI-Struktur — echte
- * Kamera-Vorschau/-Capture kommt erst, sobald der libuvccamera-Treiber-Fix steht.
+ * Screens fuer die 6 State-Machine-Zustaende. PreviewScreen nutzt bereits die echte
+ * UVC-Kamera-Vorschau ([UvcPreview]); CaptureScreen/RecheckScreen zeigen den realen
+ * Capture-Fortschritt bzw. den Dateipfad der zuletzt aufgenommenen Seite.
  */
 
 @Composable
@@ -42,14 +46,23 @@ fun LockScreen(viewModel: ScannerViewModel) {
 }
 
 @Composable
-fun PreviewScreen(viewModel: ScannerViewModel) {
+fun PreviewScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
     PlaceholderScaffold(
         title = "Vorschau (PREVIEW, 320x240 MJPEG)",
-        description = "TODO: Live-Vorschau des libuvccamera-Streams."
+        description = "Live-Vorschau der aktiven Kamera (${viewModel.activeCamera})."
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { viewModel.start_capture() }) {
-                Text("Capture")
+            UvcPreview(
+                camera = viewModel.activeCamera,
+                cameraBridge = cameraBridge,
+                viewModel = viewModel,
+                modifier = Modifier.fillMaxWidth().height(240.dp)
+            )
+            Button(
+                onClick = { viewModel.start_capture() },
+                enabled = !viewModel.captureInProgress
+            ) {
+                Text(if (viewModel.captureInProgress) "Capture laeuft ..." else "Capture")
             }
             Button(onClick = { viewModel.swap_cameras() }) {
                 Text("Swap Cameras (aktuell: ${viewModel.activeCamera})")
@@ -68,7 +81,8 @@ fun PreviewScreen(viewModel: ScannerViewModel) {
 fun CaptureScreen(viewModel: ScannerViewModel) {
     PlaceholderScaffold(
         title = "Aufnahme (CAPTURE, volle Aufloesung)",
-        description = "TODO: Pflicht-Mode-Switch, 1 Frame binaer schreiben, kein Decode/Encode."
+        description = "Pflicht-Mode-Switch laeuft: UVCCameraHandler#resize auf volle Aufloesung, " +
+            "captureStill() schreibt 1 Frame binaer, danach zurueck auf 320x240."
     ) {
         Text("Seite ${viewModel.pageNumber} wird aufgenommen ...")
     }
@@ -78,7 +92,7 @@ fun CaptureScreen(viewModel: ScannerViewModel) {
 fun RecheckScreen(viewModel: ScannerViewModel) {
     PlaceholderScaffold(
         title = "Pruefung (RECHECK)",
-        description = "TODO: zuletzt aufgenommenes Bild anzeigen."
+        description = "Zuletzt aufgenommene Datei: ${viewModel.lastCapturedFile?.absolutePath ?: "-"}"
     ) {
         Button(onClick = { viewModel.confirm_and_next_page() }) {
             Text("Next Page")

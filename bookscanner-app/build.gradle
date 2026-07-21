@@ -74,9 +74,11 @@ dependencies {
 
     debugImplementation 'androidx.compose.ui:ui-tooling'
 
-    // Fachliche Abhaengigkeit zum UVC-Kamera-Treiber. Wird aktuell parallel auf CMake migriert —
-    // erst nutzbar sobald der andere Agent den Treiber-Build stabilisiert hat.
+    // Fachliche Abhaengigkeit zum UVC-Kamera-Treiber (nativer Treiber, CMake-Build).
     implementation project(':libuvccamera')
+    // UVCCameraHandler/CameraViewInterface (USBMonitor-Anbindung, Preview/Capture-Handling) —
+    // liegen im Sample-Support-Modul usbCameraCommon, nicht in libuvccamera selbst.
+    implementation project(':usbCameraCommon')
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'

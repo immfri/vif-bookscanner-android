@@ -730,7 +730,12 @@ class UvcCameraBridge(
             // gesamten Sweeps aktiv).
             val (captureW, captureH) = captureSizeFor(camera)
             try {
-                handler.resize(captureW, captureH)
+                // Volle Bandbreite (1.0) noetig — siehe Root-Cause-Fix in
+                // [captureFullResolutionThenReturnToPreview]: mit dem Dual-Preview-Faktor 0.5
+                // kommen Capture-Aufloesungs-Frames nur unvollstaendig an ("too few scanlines"),
+                // die andere Kamera braucht waehrend des Sweeps ohnehin keine eigene Bandbreite
+                // (siehe [runFocusSweep]-Aufrufer, Sweep laeuft sequenziell je Kamera).
+                handler.resize(captureW, captureH, 1.0f)
             } catch (e: Exception) {
                 Log.w(TAG, "calibrateAuto($camera): resize auf Capture-Aufloesung ${captureW}x$captureH fuer Sweep fehlgeschlagen", e)
             }
@@ -748,7 +753,14 @@ class UvcCameraBridge(
 
                     val (previewW, previewH) = previewSizeFor(camera)
                     try {
-                        handler.resize(previewW, previewH)
+                        // BUGFIX 2026-07-21 (live am Geraet reproduziert): ohne den geteilten
+                        // Bandbreitenfaktor blieb die Live-Vorschau nach der Kalibrierung
+                        // dauerhaft schwarz (kontinuierliche "too few scanlines"-Fehler auch
+                        // Minuten spaeter) — die zweite Kamera laeuft parallel weiter und
+                        // beansprucht ihre Haelfte der USB2-Bandbreite, siehe
+                        // DUAL_PREVIEW_BANDWIDTH_FACTOR-Verwendung in [startPreview]/
+                        // [captureFullResolutionThenReturnToPreview].
+                        handler.resize(previewW, previewH, DUAL_PREVIEW_BANDWIDTH_FACTOR)
                     } catch (e: Exception) {
                         Log.w(TAG, "calibrateAuto($camera): resize zurueck auf Preview-Aufloesung ${previewW}x$previewH fehlgeschlagen", e)
                     }
@@ -762,19 +774,24 @@ class UvcCameraBridge(
                         } catch (e: Exception) {
                             Log.w(TAG, "calibrateAuto($camera): Preview-Referenz-Still fehlgeschlagen, referenceSharpnessPreview bleibt 0.0", e)
                         }
-                        mainHandler.postDelayed({
-                            val referenceSharpnessPreview = measureSharpness(previewRefFile, camera) ?: 0.0
-                            previewRefFile.delete()
+                        // BUGFIX 2026-07-21 (siehe runFocusSweep-Kommentar): gleiches Race —
+                        // captureStill() ist asynchron, handler.post{} garantiert echten
+                        // Abschluss vor dem Messen statt eines geratenen Fix-Delays.
+                        handler.post {
+                            mainHandler.post {
+                                val referenceSharpnessPreview = measureSharpness(previewRefFile, camera) ?: 0.0
+                                previewRefFile.delete()
 
-                            val result = fixed.copy(
-                                focus = peakFocus,
-                                referenceSharpness = peakSharpness,
-                                referenceSharpnessPreview = referenceSharpnessPreview,
-                                focusSweepCurve = curve
-                            )
-                            controlPrefs.save(camera, result)
-                            onResult(result)
-                        }, FOCUS_SWEEP_STEP_SETTLE_MS)
+                                val result = fixed.copy(
+                                    focus = peakFocus,
+                                    referenceSharpness = peakSharpness,
+                                    referenceSharpnessPreview = referenceSharpnessPreview,
+                                    focusSweepCurve = curve
+                                )
+                                controlPrefs.save(camera, result)
+                                onResult(result)
+                            }
+                        }
                     }, CAPTURE_SETTLE_DELAY_MS)
                 }
             }, CAPTURE_SETTLE_DELAY_MS)
@@ -816,12 +833,30 @@ class UvcCameraBridge(
                 } catch (e: Exception) {
                     Log.w(TAG, "runFocusSweep($camera): captureStill bei Schritt $focusValue fehlgeschlagen", e)
                 }
-                mainHandler.postDelayed({
-                    val sharpness = measureSharpness(stepFile, camera) ?: 0.0
-                    stepFile.delete()
-                    curve.add(focusValue to sharpness)
-                    stepAt(index + 1)
-                }, FOCUS_SWEEP_STEP_SETTLE_MS)
+                // BUGFIX 2026-07-21 (live am Geraet reproduziert, siehe Logcat-Analyse
+                // clean_log.txt): captureStill() ist asynchron (postet nur MSG_CAPTURE_STILL
+                // an den CameraThread) und kann durch RAW_CAPTURE_TIMEOUT_MS+Fallback
+                // (AbstractUVCCameraHandler) mehrere Sekunden dauern. Der vorherige
+                // FOCUS_SWEEP_STEP_SETTLE_MS-Fix-Delay (200ms) wartete NIE lang genug —
+                // measureSharpness() las die Datei, bevor sie geschrieben war (0.0-Werte),
+                // UND der naechste Schritt feuerte bereits die naechste captureStill(),
+                // obwohl der CameraThread den vorherigen Request noch gar nicht abgearbeitet
+                // hatte. Ergebnis: alle 21 Schritte wurden in ~4s "durchgewunken" (Kurve
+                // voller 0.0-Werte), waehrend sich auf dem CameraThread ein Rueckstau von 21
+                // echten Capture-Requests aufbaute, der die Live-Vorschau noch MINUTEN nach
+                // Abschluss des sichtbaren Kalibrier-Vorgangs blockierte (~10s/Request seriell
+                // abgearbeitet). Fix: handler.post{} haengt sich als naechste Message HINTER
+                // die gerade gepostete MSG_CAPTURE_STILL auf demselben CameraThread — feuert
+                // also garantiert erst NACH deren echtem Abschluss (identisches Muster wie in
+                // [captureFullResolutionThenReturnToPreview]), kein Rueckstau mehr moeglich.
+                handler.post {
+                    mainHandler.post {
+                        val sharpness = measureSharpness(stepFile, camera) ?: 0.0
+                        stepFile.delete()
+                        curve.add(focusValue to sharpness)
+                        stepAt(index + 1)
+                    }
+                }
             }, FOCUS_SWEEP_STEP_SETTLE_MS)
         }
         stepAt(0)

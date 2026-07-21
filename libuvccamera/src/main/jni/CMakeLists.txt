@@ -95,6 +95,14 @@ target_include_directories(jpeg-turbo1500 PUBLIC
 )
 target_compile_definitions(jpeg-turbo1500 PRIVATE ANDROID_NDK)
 target_compile_options(jpeg-turbo1500 PRIVATE -Wno-incompatible-pointer-types)
+# Original Android.mk setzte SIZEOF_SIZE_T pro ABI (4 fuer 32-bit, 8 fuer 64-bit) im
+# SIMD-Zweig; da jsimd_none.c genutzt wird lief dieser Zweig nicht mehr, jchuff.c
+# braucht das Define aber trotzdem direkt (siehe #error "Cannot determine word size").
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+	target_compile_definitions(jpeg-turbo1500 PRIVATE SIZEOF_SIZE_T=8)
+else()
+	target_compile_definitions(jpeg-turbo1500 PRIVATE SIZEOF_SIZE_T=4)
+endif()
 
 # ---------------------------------------------------------------------------
 # 2) libusb100 (aus libusb/android/jni/libusb.mk)
@@ -122,6 +130,10 @@ target_include_directories(usb100 PUBLIC
 target_include_directories(usb100 PRIVATE
 	${LIBUSB_DIR}/libusb/os
 	${LIBUSB_DIR}/android
+	# libusb/android/config.h inkludiert utilbase.h, das im Original per
+	# LOCAL_C_INCLUDES vom uebergeordneten UVCCamera-Modul (JNI_DIR) bereitgestellt
+	# wurde. Ohne diesen Include-Pfad: "fatal error: 'utilbase.h' file not found".
+	${JNI_DIR}
 )
 target_compile_definitions(usb100 PRIVATE ANDROID_NDK ACCESS_RAW_DESCRIPTORS)
 target_compile_options(usb100 PRIVATE -O3 -fstrict-aliasing)
@@ -147,6 +159,8 @@ target_include_directories(uvc PUBLIC
 	${LIBUVC_DIR}
 	${LIBUVC_DIR}/include
 	${LIBUVC_DIR}/include/libuvc
+	# libuvc_config.h inkludiert ebenfalls utilbase.h, siehe Kommentar bei usb100.
+	${JNI_DIR}
 )
 target_compile_definitions(uvc PRIVATE ANDROID_NDK LOG_NDEBUG UVC_DEBUGGING)
 target_link_libraries(uvc log jpeg-turbo1500 usb100)

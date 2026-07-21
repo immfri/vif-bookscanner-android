@@ -46,6 +46,9 @@ proguard/
 build/
 build
 
+# CMake/ndk-Build-Zwischendateien (externalNativeBuild)
+.cxx/
+
 # gedit
 *~
 

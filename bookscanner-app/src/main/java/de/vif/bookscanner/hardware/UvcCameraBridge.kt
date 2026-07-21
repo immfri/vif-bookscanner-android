@@ -15,6 +15,7 @@ import com.serenegiant.usb.USBMonitor.OnDeviceConnectListener
 import com.serenegiant.usb.USBMonitor.UsbControlBlock
 import com.serenegiant.usb.UVCCamera
 import com.serenegiant.usbcameracommon.UVCCameraHandler
+import com.serenegiant.usbcameracommon.AbstractUVCCameraHandler.CameraCallback
 import com.serenegiant.widget.CameraViewInterface
 import de.vif.bookscanner.state.CameraSelection
 import java.io.File
@@ -138,6 +139,25 @@ class UvcCameraBridge(
     // die Verbindung stillschweigend zu verlieren.
     private var pendingCtrlBlockL: UsbControlBlock? = null
     private var pendingCtrlBlockR: UsbControlBlock? = null
+
+    // FIX Bug 1 (Race Condition Slot-Zuweisung, 2026-07-21): handler.open() ist ASYNCHRON
+    // (postet nur eine MSG_OPEN-Message an den CameraThread, siehe AbstractUVCCameraHandler#open
+    // -> sendMessage). handlerX?.isOpened wird deshalb NICHT sofort nach dem Aufruf von
+    // handler.open() wahr, sondern erst wenn der CameraThread handleOpen() abgearbeitet hat.
+    // Wenn onConnect() fuer das zweite Geraet feuert BEVOR das, sah die alte Pruefung
+    // (isOpened == true || pendingCtrlBlock != null) den Slot faelschlich noch als frei an ->
+    // beide Kameras wurden LEFT zugewiesen. Diese Flags werden SYNCHRON gesetzt, in dem Moment
+    // in dem onConnect() einen Slot einem Geraet zuweist (nicht erst wenn der Handler tatsaechlich
+    // offen ist) und wieder freigegeben bei Fehlschlag/Disconnect.
+    private var slotClaimedL: Boolean = false
+    private var slotClaimedR: Boolean = false
+
+    private fun setSlotClaimed(camera: CameraSelection, claimed: Boolean) {
+        when (camera) {
+            CameraSelection.LEFT -> slotClaimedL = claimed
+            CameraSelection.RIGHT -> slotClaimedR = claimed
+        }
+    }
 
     // Dynamisch ermittelte Groessen (Punkt "generische UVC-Vollkompatibilitaet", 2026-07-21):
     // pro Kamera-Slot befuellt in [resolveCameraSizes], NACHDEM handler.open() erfolgreich war
@@ -318,16 +338,43 @@ class UvcCameraBridge(
             CameraSelection.LEFT -> pendingCtrlBlockL = null
             CameraSelection.RIGHT -> pendingCtrlBlockR = null
         }
+        // FIX Bug 2 (siehe onConnect-Kommentar): auch hier auf den echten CameraCallback.onOpen()
+        // warten statt direkt nach dem asynchronen handler.open() zu posten.
+        val cameraCallback = object : CameraCallback {
+            override fun onOpen() {
+                mainHandler.post {
+                    resolveCameraSizes(camera, handler)
+                    startPreview(camera)
+                    applyManualControls(camera, controlPrefs.load(camera))
+                    listener.onCameraOpened(camera)
+                }
+                handler.removeCallback(this)
+            }
+
+            override fun onClose() {
+                handler.removeCallback(this)
+            }
+
+            override fun onStartPreview() {}
+            override fun onStopPreview() {}
+            override fun onStartRecording() {}
+            override fun onStopRecording() {}
+
+            override fun onError(e: Exception?) {
+                mainHandler.post {
+                    listener.onError(camera, e ?: IllegalStateException("Unbekannter Kamerafehler ($camera)"))
+                }
+                handler.removeCallback(this)
+            }
+        }
+        handler.addCallback(cameraCallback)
+
         try {
             handler.open(ctrlBlock)
-            mainHandler.post {
-                resolveCameraSizes(camera, handler)
-                startPreview(camera)
-                applyManualControls(camera, controlPrefs.load(camera))
-                listener.onCameraOpened(camera)
-            }
         } catch (e: Exception) {
             Log.e(TAG, "openPendingConnectionIfAny: Handler.open() fuer $camera fehlgeschlagen", e)
+            handler.removeCallback(cameraCallback)
+            setSlotClaimed(camera, false)
             listener.onError(camera, e)
         }
     }
@@ -861,12 +908,15 @@ class UvcCameraBridge(
 
         override fun onConnect(device: UsbDevice, ctrlBlock: UsbControlBlock, createNew: Boolean) {
             Log.d(TAG, "onConnect: $device createNew=$createNew")
-            // Ein Slot gilt als "belegt", sobald er entweder schon offen ist ODER schon einen
-            // nachzuholenden ControlBlock wartend haelt (verhindert, dass zwei Geraete beide
-            // auf LEFT gemapped werden, wenn onConnect fuer beide feuert bevor irgendeine
-            // UvcPreview-View existiert).
-            val leftTaken = handlerL?.isOpened == true || pendingCtrlBlockL != null
-            val rightTaken = handlerR?.isOpened == true || pendingCtrlBlockR != null
+            // Ein Slot gilt als "belegt", sobald er entweder schon offen ist, schon einen
+            // nachzuholenden ControlBlock wartend haelt, ODER (FIX Bug 1) synchron als
+            // "claimed" markiert wurde — Letzteres verhindert die Race Condition: handler.open()
+            // ist asynchron, isOpened wuerde erst NACH dem CameraThread-Roundtrip wahr, also
+            // MUSS die Slot-Belegung schon HIER, synchron beim Zuweisen, sichtbar werden, sonst
+            // sieht die zweite onConnect()-Ausfuehrung (fuer die zweite Kamera) den Slot noch
+            // faelschlich als frei an und beide Geraete werden auf LEFT gemapped.
+            val leftTaken = handlerL?.isOpened == true || pendingCtrlBlockL != null || slotClaimedL
+            val rightTaken = handlerR?.isOpened == true || pendingCtrlBlockR != null || slotClaimedR
             val slot = when {
                 !leftTaken -> CameraSelection.LEFT
                 !rightTaken -> CameraSelection.RIGHT
@@ -876,6 +926,8 @@ class UvcCameraBridge(
                 Log.d(TAG, "onConnect: kein freier Slot mehr, Geraet wird ignoriert")
                 return
             }
+            // Synchron VOR jedem weiteren Schritt markieren — das ist der eigentliche Fix.
+            setSlotClaimed(slot, true)
             Log.d(TAG, "onConnect: Slot $slot zugewiesen, oeffne Handler")
 
             ensureHandler(slot)
@@ -884,6 +936,7 @@ class UvcCameraBridge(
                 // UvcPreview (bindCameraView) fuer diesen Slot existiert noch nicht (z.B. App
                 // steht noch auf CALIBRATION/LOCK) — ControlBlock zwischenspeichern, wird in
                 // bindCameraView()/openPendingConnectionIfAny() nachgeholt statt verworfen.
+                // Slot bleibt claimed (pendingCtrlBlockX ist ab jetzt ohnehin != null).
                 Log.d(TAG, "onConnect: kein Handler fuer Slot $slot, ControlBlock wird zwischengespeichert")
                 when (slot) {
                     CameraSelection.LEFT -> pendingCtrlBlockL = ctrlBlock
@@ -891,27 +944,64 @@ class UvcCameraBridge(
                 }
                 return
             }
+
+            // FIX Bug 2 (resolveCameraSizes() liefert "keine Groessen", Timing-Problem):
+            // handler.open() ist asynchron (postet MSG_OPEN an den CameraThread, siehe
+            // AbstractUVCCameraHandler#open/#handleOpen). Ein direktes mainHandler.post {...}
+            // NACH dem open()-Aufruf laeuft auf einer voellig anderen Message-Queue (Main-
+            // Looper) und hat KEINE garantierte Reihenfolge zum CameraThread-Abschluss von
+            // handleOpen() — resolveCameraSizes() lief dadurch teils BEVOR die UVC-Descriptor-
+            // Daten ueberhaupt eingelesen waren, getSupportedSizeList() lieferte dann leer.
+            // Die Bibliothek bietet dafuer einen echten Abschluss-Callback: CameraCallback.onOpen()
+            // wird von AbstractUVCCameraHandler.CameraThread.handleOpen() erst NACH erfolgreichem
+            // camera.open(ctrlBlock) aufgerufen (callOnOpen(), siehe AbstractUVCCameraHandler.java
+            // handleOpen()/callOnOpen()) — das ist der zuverlaessige "open completed"-Callback,
+            // kein Raten/Polling mehr.
+            val cameraCallback = object : CameraCallback {
+                override fun onOpen() {
+                    mainHandler.post {
+                        // Muss VOR startPreview() laufen (siehe [resolveCameraSizes]-Kommentar):
+                        // setzt die dynamisch ermittelte Preview-Groesse, die erst nach
+                        // abgeschlossenem handler.open() per echtem UVC-Descriptor bekannt ist.
+                        resolveCameraSizes(slot, handler)
+                        startPreview(slot)
+                        // Gespeicherte Einstellungen dieses Slots (falls schon einmal kalibriert/
+                        // gespeichert) sofort erneut auf den Treiber schreiben — siehe Arducam-
+                        // Recherche (Fokuswert geht bei USB-Reconnect verloren, muss aktiv neu
+                        // gesendet werden).
+                        applyManualControls(slot, controlPrefs.load(slot))
+                        listener.onCameraOpened(slot)
+                    }
+                    handler.removeCallback(this)
+                }
+
+                override fun onClose() {
+                    handler.removeCallback(this)
+                }
+
+                override fun onStartPreview() {}
+                override fun onStopPreview() {}
+                override fun onStartRecording() {}
+                override fun onStopRecording() {}
+
+                override fun onError(e: Exception?) {
+                    mainHandler.post {
+                        listener.onError(slot, e ?: IllegalStateException("Unbekannter Kamerafehler ($slot)"))
+                    }
+                    handler.removeCallback(this)
+                }
+            }
+            handler.addCallback(cameraCallback)
+
             try {
                 handler.open(ctrlBlock)
-                Log.d(TAG, "onConnect: Handler.open() fuer $slot aufgerufen")
+                Log.d(TAG, "onConnect: Handler.open() fuer $slot aufgerufen (asynchron, Fortsetzung in CameraCallback.onOpen())")
             } catch (e: Exception) {
                 Log.e(TAG, "onConnect: Handler.open() fuer $slot fehlgeschlagen", e)
+                handler.removeCallback(cameraCallback)
+                setSlotClaimed(slot, false)
                 listener.onError(slot, e)
                 return
-            }
-
-            mainHandler.post {
-                // Muss VOR startPreview() laufen (siehe [resolveCameraSizes]-Kommentar):
-                // setzt die dynamisch ermittelte Preview-Groesse, die erst nach handler.open()
-                // per echtem UVC-Descriptor bekannt ist.
-                resolveCameraSizes(slot, handler)
-                startPreview(slot)
-                // Gespeicherte Einstellungen dieses Slots (falls schon einmal kalibriert/
-                // gespeichert) sofort erneut auf den Treiber schreiben — siehe Arducam-
-                // Recherche (Fokuswert geht bei USB-Reconnect verloren, muss aktiv neu
-                // gesendet werden).
-                applyManualControls(slot, controlPrefs.load(slot))
-                listener.onCameraOpened(slot)
             }
         }
 
@@ -923,6 +1013,10 @@ class UvcCameraBridge(
             } ?: return
 
             handlerFor(slot)?.close()
+            // FIX Bug 1: Slot beim Trennen wieder freigeben, sonst bleibt er nach einem
+            // Disconnect faelschlich dauerhaft "claimed" und ein Reconnect bekommt nie mehr
+            // diesen Slot zugewiesen.
+            setSlotClaimed(slot, false)
             mainHandler.post { listener.onCameraClosed(slot) }
         }
 

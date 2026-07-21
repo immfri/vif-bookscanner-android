@@ -30,13 +30,30 @@ import de.vif.bookscanner.state.ScannerViewModel
  * neue Kamera nie aufgerufen (Kalibrieren fuer RIGHT schlug deshalb still fehl, weil
  * `viewR` nie gesetzt wurde). `key(camera)` zwingt Compose, die AndroidView bei jedem
  * Kamera-Wechsel zu verwerfen und die `factory` frisch auszufuehren.
+ *
+ * WICHTIG 3 (live gefunden, 2026-07-21): Zoom/Pan fuer den Pinch-Zoom-Livefeed
+ * (SettingsScreen) darf NICHT ueber Compose `Modifier.graphicsLayer(scaleX=..., clip=true)`
+ * laufen — das ist ein RenderNode-Transform, und eine hardwarebeschleunigte TextureView
+ * (eigene SurfaceTexture, eigenes Compositing-Fenster) wird darin nicht korrekt erfasst:
+ * live beobachtet als komplett grauer Kasten (nur der `Color.DarkGray`-Hintergrund der
+ * Box, kein Kamerabild) statt eines vergroesserten Bilds. Native View-Properties
+ * (`View.scaleX/scaleY/translationX/translationY`, gesetzt im `update`-Block) werden von
+ * TextureView dagegen korrekt beruecksichtigt. `zoomState` deckt genau diesen Fall ab;
+ * bleibt er null (Standard, z. B. CalibrationScreen), bleibt die View unskaliert 1:1.
  */
+data class UvcPreviewZoomState(
+    val scale: Float = 1f,
+    val translationX: Float = 0f,
+    val translationY: Float = 0f
+)
+
 @Composable
 fun UvcPreview(
     camera: CameraSelection,
     cameraBridge: UvcCameraBridge,
     viewModel: ScannerViewModel,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    zoomState: UvcPreviewZoomState? = null
 ) {
     key(camera) {
         AndroidView(
@@ -46,6 +63,13 @@ fun UvcPreview(
                     view.setAspectRatio(4.0 / 3.0)
                     cameraBridge.bindCameraView(camera, view)
                 }
+            },
+            update = { view ->
+                val z = zoomState ?: UvcPreviewZoomState()
+                view.scaleX = z.scale
+                view.scaleY = z.scale
+                view.translationX = z.translationX
+                view.translationY = z.translationY
             }
         )
     }

@@ -439,7 +439,18 @@ class UvcCameraBridge(
             CameraSelection.LEFT -> pendingSurfaceL = surface
             CameraSelection.RIGHT -> pendingSurfaceR = surface
         }
-        handler.startPreview(surface)
+        // WICHTIG (live gefunden, 2026-07-21): handler.startPreview() ist auf dem nativen
+        // CameraThread hart gegen Mehrfachaufruf gesperrt (No-Op falls bereits previewing).
+        // Nach einem Compose-Screen-Wechsel (neue TextureView fuer dieselbe schon offene
+        // Kamera, siehe ensureHandler) blieb der Frame-Strom deshalb dauerhaft an der ALTEN,
+        // laengst zerstoerten Surface haengen — sichtbar als dauerhaft grauer Preview-Kasten
+        // UND Logcat-Dauerspam "BufferQueue has been abandoned". rebindSurface() stoppt die
+        // laufende Preview kurz und haengt sie an die neue Surface um.
+        if (handler.isPreviewing) {
+            handler.rebindSurface(surface)
+        } else {
+            handler.startPreview(surface)
+        }
     }
 
     fun stopPreview(camera: CameraSelection) {

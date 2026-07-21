@@ -96,6 +96,8 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 	private static final int MSG_RELEASE = 9;
 	/** ERGAENZUNG (vif-bookscanner, 2026-07-21): echtes Mid-Stream-Resize, siehe {@link #resize(int, int)}. */
 	private static final int MSG_RESIZE = 10;
+	/** ERGAENZUNG (vif-bookscanner, 2026-07-21): Surface-Swap waehrend laufender Preview, siehe {@link #rebindSurface(Object)}. */
+	private static final int MSG_REBIND_SURFACE = 11;
 
 	private final WeakReference<AbstractUVCCameraHandler.CameraThread> mWeakThread;
 	private volatile boolean mReleased;
@@ -196,6 +198,25 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 	public void resize(final int width, final int height) {
 		checkReleased();
 		sendMessage(obtainMessage(MSG_RESIZE, width, height));
+	}
+
+	/**
+	 * Bindet die laufende Preview an eine NEUE Surface um, ohne Groesse zu aendern.
+	 * ERGAENZUNG (vif-bookscanner, 2026-07-21): {@link #startPreview(Object)} ist beim
+	 * CameraThread hart gegen Mehrfachaufruf gesperrt ({@code if (mIsPreviewing) return;} in
+	 * {@code handleStartPreview}) — nach einem Compose-Screen-Wechsel (neue AndroidView/
+	 * TextureView fuer dieselbe schon offene Kamera) hing der native Frame-Strom dadurch
+	 * dauerhaft an der ALTEN, bereits zerstoerten Surface (live beobachtet: Vorschau blieb
+	 * grau, Logcat spammte "BufferQueue has been abandoned" im Preview-Takt). Dieser Weg
+	 * stoppt die laufende Preview kurz, haengt die neue Surface ein und startet sie sofort
+	 * wieder — analog zu {@link #resize(int, int)}, nur ohne Groessenaenderung.
+	 */
+	public void rebindSurface(final Object surface) {
+		checkReleased();
+		if (!((surface instanceof SurfaceHolder) || (surface instanceof Surface) || (surface instanceof SurfaceTexture))) {
+			throw new IllegalArgumentException("surface should be one of SurfaceHolder, Surface or SurfaceTexture");
+		}
+		sendMessage(obtainMessage(MSG_REBIND_SURFACE, surface));
 	}
 
 	protected void startPreview(final Object surface) {
@@ -464,6 +485,9 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 		case MSG_RESIZE:
 			thread.handleResize(msg.arg1, msg.arg2);
 			break;
+		case MSG_REBIND_SURFACE:
+			thread.handleRebindSurface(msg.obj);
+			break;
 		case MSG_RELEASE:
 			thread.handleRelease();
 			break;
@@ -709,6 +733,26 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 				}
 				restartPreviewWithCurrentSize(wasPreviewing);
 			}
+		}
+
+		/**
+		 * Haengt die laufende (oder gestoppte) Preview an eine neue Surface um, siehe
+		 * {@link AbstractUVCCameraHandler#rebindSurface(Object)}. Groesse bleibt unveraendert —
+		 * nur {@link #mPreviewSurface} wird ersetzt und ueber {@link #restartPreviewWithCurrentSize}
+		 * neu verbunden.
+		 */
+		public void handleRebindSurface(final Object newSurface) {
+			if (DEBUG) Log.v(TAG_THREAD, "handleRebindSurface:");
+			if (mUVCCamera == null) return;
+			final boolean wasPreviewing = mIsPreviewing;
+			if (wasPreviewing) {
+				mUVCCamera.stopPreview();
+				synchronized (mSync) {
+					mIsPreviewing = false;
+				}
+			}
+			mPreviewSurface = newSurface;
+			restartPreviewWithCurrentSize(true);
 		}
 
 		/**

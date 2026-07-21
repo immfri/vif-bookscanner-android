@@ -70,7 +70,12 @@ public class UVCCameraTextureView extends AspectRatioTextureView    // API >= 14
 	 * kuenftigen startPreview/resize-Nachrichten verarbeitet (Deadlock, kein Modus-Wechsel
 	 * bringt das Bild zurueck).
 	 */
-	private static final long CAPTURE_STILL_IMAGE_TIMEOUT_MS = 2000L;
+	// 2026-07-21 von 2000 auf 5000 erhoeht: Live-Messung (diagnoseModeSwitchSettleTime) zeigte,
+	// dass nach dem resize() auf volle Sensor-Aufloesung (4656x3496 via USB2) der erste Frame
+	// laenger als 2s brauchen kann — 2000ms produzierte reproduzierbare Timeouts im normalen
+	// Capture-Flow. 5000ms deckt die gemessene Realitaet mit Reserve ab; der Wert ist eine
+	// OBERGRENZE (kein fixes Warten), ein frueher ankommender Frame beendet das wait() sofort.
+	private static final long CAPTURE_STILL_IMAGE_TIMEOUT_MS = 5000L;
 	/** for calculation of frame rate */
 	private final FpsCounter mFpsCounter = new FpsCounter();
 

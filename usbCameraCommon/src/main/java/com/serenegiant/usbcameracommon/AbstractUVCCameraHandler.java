@@ -795,34 +795,74 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 			return true;
 		}
 
+		/** Sync-Objekt fuer den Raw-Frame-Capture-Pfad — der IFrameCallback feuert auf dem
+		 * nativen JNI-Capture-Thread, nicht auf diesem CameraThread. */
+		private final Object mRawCaptureSync = new Object();
+
+		/** Wartezeit auf einen rohen MJPEG-Frame nach Callback-Registrierung. Bei voller
+		 * Sensor-Aufloesung (4656x3496 via USB2) betraegt das reale Frame-Intervall laut
+		 * Live-Messung (diagnoseModeSwitchSettleTime, 2026-07-21) bis ~2s — 5000ms ist
+		 * Obergrenze mit Reserve, ein frueher ankommender Frame beendet das wait() sofort. */
+		private static final long RAW_CAPTURE_TIMEOUT_MS = 5000L;
+
+		/**
+		 * ARCHITEKTUR (vif-bookscanner, 2026-07-21, Offline-Neuimplementierung nach
+		 * Log-Analyse — UNGETESTET AM GERAET, siehe Commit-Message):
+		 *
+		 * ROOT-CAUSE-BEFUND aus den Live-Logs: nach handler.resize() auf volle Sensor-
+		 * Aufloesung feuerte "onSurfaceDestroy" fuer die TextureView (AspectRatio/Layout-
+		 * Aenderung), OHNE dass je ein "onSurfaceCreated" folgte — die Display-Surface war
+		 * damit tot, die alte captureStillImage()-Implementierung (wartet auf den naechsten
+		 * onSurfaceTextureUpdated-Frame der TextureView) konnte also NIE einen Frame sehen
+		 * und lief reproduzierbar in ihren Timeout. Der Erfolgslauf von 12:44 war Timing-
+		 * Glueck (Surface ueberlebte den resize dort).
+		 *
+		 * PRIMAERWEG (Raw): {@link UVCCamera#setFrameCallback(IFrameCallback, int)} mit
+		 * {@link UVCCamera#PIXEL_FORMAT_RAW} — haengt am nativen UVC-Stream selbst, NICHT an
+		 * der (potentiell toten) Display-Surface, und liefert bei MJPEG-Streamformat die
+		 * rohen JPEG-Bytes 1:1 aus dem USB-Transfer (User-Anforderung: Sensor-Output
+		 * unveraendert ablegen, keine Dekodierung/Rekompression). Der fruehere Fehlschlag
+		 * dieses Wegs (13:52) fiel exakt mit der toten Surface zusammen — ob der native
+		 * Stream dort noch lief, ist unklar, deshalb:
+		 *
+		 * FALLBACK (Bitmap): kommt innerhalb {@link #RAW_CAPTURE_TIMEOUT_MS} kein roher
+		 * Frame, wird einmalig der alte TextureView-Weg versucht (Bitmap-Readback + JPEG
+		 * Q100 — Rekompression, aber besser als gar kein Bild) und das Ergebnis im Log klar
+		 * als Fallback gekennzeichnet. Schlaegt auch das fehl, gibt es einen klaren
+		 * onError-Fehler statt stillen Versagens.
+		 */
 		public void handleCaptureStill(final String path) {
 			if (DEBUG) Log.v(TAG_THREAD, "handleCaptureStill:");
 			final Activity parent = mWeakParent.get();
 			if (parent == null) return;
 			mSoundPool.play(mSoundId, 0.2f, 0.2f, 0, 0, 1.0f);	// play shutter sound
+
+			final File outputFile = TextUtils.isEmpty(path)
+				? MediaMuxerWrapper.getCaptureFile(Environment.DIRECTORY_DCIM, ".jpg")
+				: new File(path);
+
+			if (captureRawFrameToFile(outputFile)) {
+				Log.i(TAG_THREAD, "handleCaptureStill: roher MJPEG-Frame 1:1 gespeichert (" + outputFile.length() + " Bytes)");
+				mHandler.sendMessage(mHandler.obtainMessage(MSG_MEDIA_UPDATE, outputFile.getPath()));
+				return;
+			}
+
+			Log.w(TAG_THREAD, "handleCaptureStill: Raw-Frame-Pfad lieferte keinen Frame, Fallback auf TextureView-Bitmap");
 			try {
 				final Bitmap bitmap = mWeakCameraView.get().captureStillImage();
 				if (bitmap == null) {
-					// ERGAENZUNG (vif-bookscanner, 2026-07-21): captureStillImage() liefert seit
-					// dem Timeout-Fix null statt unbegrenzt zu blockieren, wenn kein neuer Frame
-					// kam (z.B. Preview nach resize()-Moduswechsel noch nicht wieder aktiv).
-					// Klarer Fehler statt impliziter NullPointerException bei bitmap.compress().
-					callOnError(new IllegalStateException("captureStillImage: kein Bild erhalten (Timeout)"));
+					callOnError(new IllegalStateException("handleCaptureStill: weder roher Frame noch TextureView-Bild erhalten (Timeout)"));
 					return;
 				}
-				// get buffered output stream for saving a captured still image as a file on external storage.
-				// the file name is came from current time.
-				// You should use extension name as same as CompressFormat when calling Bitmap#compress.
-				final File outputFile = TextUtils.isEmpty(path)
-					? MediaMuxerWrapper.getCaptureFile(Environment.DIRECTORY_DCIM, ".png")
-					: new File(path);
 				final BufferedOutputStream os = new BufferedOutputStream(new FileOutputStream(outputFile));
 				try {
 					try {
-						bitmap.compress(Bitmap.CompressFormat.PNG, 100, os);
+						bitmap.compress(Bitmap.CompressFormat.JPEG, 100, os);
 						os.flush();
+						Log.i(TAG_THREAD, "handleCaptureStill: FALLBACK-Bild via TextureView gespeichert (rekomprimiert, JPEG Q100)");
 						mHandler.sendMessage(mHandler.obtainMessage(MSG_MEDIA_UPDATE, outputFile.getPath()));
 					} catch (final IOException e) {
+						callOnError(e);
 					}
 				} finally {
 					os.close();
@@ -830,6 +870,66 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 			} catch (final Exception e) {
 				callOnError(e);
 			}
+		}
+
+		/**
+		 * Greift genau EINEN rohen Frame vom nativen UVC-Stream ab und schreibt ihn
+		 * byte-identisch in {@code outputFile}. Liefert false bei Timeout/Fehler (Datei dann
+		 * ggf. geloescht) — Aufrufer entscheidet ueber den Fallback. Siehe
+		 * {@link #handleCaptureStill(String)} fuer die Architektur-Begruendung.
+		 */
+		private boolean captureRawFrameToFile(final File outputFile) {
+			if (mUVCCamera == null) return false;
+			final boolean[] written = new boolean[1];
+			final IFrameCallback rawFrameCallback = new IFrameCallback() {
+				@Override
+				public void onFrame(final ByteBuffer frame) {
+					synchronized (mRawCaptureSync) {
+						if (written[0]) return; // nur den ersten Frame verwenden
+						try {
+							final ByteBuffer readOnly = frame.asReadOnlyBuffer();
+							readOnly.rewind();
+							final byte[] bytes = new byte[readOnly.remaining()];
+							readOnly.get(bytes);
+							final BufferedOutputStream os = new BufferedOutputStream(new FileOutputStream(outputFile));
+							try {
+								os.write(bytes);
+								os.flush();
+							} finally {
+								os.close();
+							}
+							written[0] = true;
+						} catch (final Exception e) {
+							Log.w(TAG_THREAD, "captureRawFrameToFile: Schreiben des rohen Frames fehlgeschlagen", e);
+						} finally {
+							mRawCaptureSync.notifyAll();
+						}
+					}
+				}
+			};
+
+			synchronized (mRawCaptureSync) {
+				try {
+					mUVCCamera.setFrameCallback(rawFrameCallback, UVCCamera.PIXEL_FORMAT_RAW);
+				} catch (final Exception e) {
+					Log.w(TAG_THREAD, "captureRawFrameToFile: setFrameCallback fehlgeschlagen", e);
+					return false;
+				}
+				try {
+					mRawCaptureSync.wait(RAW_CAPTURE_TIMEOUT_MS);
+				} catch (final InterruptedException e) {
+					// als Timeout behandeln
+				}
+				try {
+					mUVCCamera.setFrameCallback(null, 0);
+				} catch (final Exception e) {
+					// Abmelden darf nie den Capture-Ausgang aendern
+				}
+			}
+			if (!written[0] && outputFile.exists() && outputFile.length() == 0) {
+				outputFile.delete();
+			}
+			return written[0];
 		}
 
 		public void handleStartRecording() {

@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -92,10 +94,14 @@ fun SettingsScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
 
         // --- Split-Layout: Einstellungen links, Live-Feed rechts ---
         Row(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
+            // verticalScroll (Fix 2026-07-21): ohne Scroll ragte das Toleranzband-Eingabefeld
+            // samt Auto-Retry-Checkbox (SharpnessCheckSettings) im Landscape-Layout unten aus
+            // dem Bildschirm — live beobachtet als unerreichbare/abgeschnittene Elemente.
             Column(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
+                    .verticalScroll(rememberScrollState())
                     .padding(end = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {

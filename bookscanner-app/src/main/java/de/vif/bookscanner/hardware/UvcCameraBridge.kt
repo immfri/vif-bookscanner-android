@@ -85,7 +85,13 @@ class UvcCameraBridge(
          * (siehe [resolveCameraSizes]), nicht geraten. */
         private const val PREVIEW_TARGET_AREA = 320L * 240L
 
-        private const val CAPTURE_SETTLE_DELAY_MS = 400L
+        // 2026-07-21 von 400 auf 2000 erhoeht: die Live-Messung (diagnoseModeSwitchSettleTime,
+        // beide Kameras, je 10 Frames) zeigte, dass nach dem resize() auf volle Sensor-
+        // Aufloesung (4656x3496 via USB2) der erste verwertbare Frame real ~1,9s braucht —
+        // 400ms war ein ungetesteter Platzhalter weit unterhalb der Realitaet und Mitursache
+        // der Capture-Timeouts. Spaeter ggf. weiter optimierbar, sobald der Raw-Frame-Pfad
+        // (siehe AbstractUVCCameraHandler#handleCaptureStill) am Geraet vermessen ist.
+        private const val CAPTURE_SETTLE_DELAY_MS = 2000L
 
         /** Wartezeit bis der Auto-Fokus/Auto-WB-Regelkreis eingeschwungen ist, bevor der
          * erreichte Wert ausgelesen und Auto abgeschaltet (fixiert) wird. Ungetestet mit
@@ -116,6 +122,11 @@ class UvcCameraBridge(
          * ueber Bildqualitaet (das ist ja genau der Messwert, den [diagnoseModeSwitchSettleTime]
          * ermitteln soll). Absichtlich sehr kurz gehalten. */
         private const val FRAME_READ_POLL_DELAY_MS = 30L
+
+        /** Sicherheits-Obergrenze fuer [diagnoseModeSwitchSettleTime]s Datei-Ready-Polling
+         * (siehe dortiger Kommentar) — verhindert endloses Warten, falls captureStill() fuer
+         * einen Frame nie eine lesbare Datei liefert (z.B. Timeout im nativen Layer). */
+        private const val FRAME_READ_POLL_MAX_ATTEMPTS = 60
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -559,26 +570,39 @@ class UvcCameraBridge(
                 return
             }
             val frameFile = File(activity.cacheDir, "settle_diag_${camera}_${index}.jpg")
+            val requestSentMs = System.currentTimeMillis()
             try {
                 handler.captureStill(frameFile.absolutePath)
             } catch (e: Exception) {
                 Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): captureStill Frame $index fehlgeschlagen", e)
             }
-            // Bewusst KEINE Wartezeit vor dem naechsten captureStill-Aufruf (schnellstmoegliche
-            // Frame-Anforderung ist genau der Test) — nur eine minimale Verzoegerung, damit die
-            // native Schreib-Pipeline die vorherige Datei fertigstellen kann, bevor sie gelesen
-            // wird (reine Mess-Notwendigkeit, keine Settle-Annahme fuer die Bildqualitaet).
-            mainHandler.postDelayed({
-                val elapsedMs = System.currentTimeMillis() - switchStartMs
-                val sharpness = measureSharpness(frameFile, camera)
-                frameFile.delete()
-                if (sharpness != null) {
-                    Log.i(TAG, "diagnoseModeSwitchSettleTime($camera): Frame $index: Schaerfe=$sharpness, +${elapsedMs}ms seit Moduswechsel")
+            // KORREKTUR (live gefunden, 2026-07-21): ein fixes Delay vor dem Lesen war zu kurz —
+            // handleCaptureStill() schreibt SYNCHRON auf dem CameraThread (bitmap.compress() bei
+            // voller Sensor-Aufloesung dauert je nach Geraet deutlich laenger als angenommene
+            // 30ms), der erste Live-Messlauf lieferte deshalb bei ALLEN 10 Frames "kein lesbares
+            // Bild" statt echter Schaerfewerte. Fix: statt zu raten, auf tatsaechliche
+            // Datei-Fertigstellung pollen (Existenz + ueber zwei Polls stabile Groesse), mit
+            // Sicherheits-Timeout. Die dafuer benoetigte Zeit IST zugleich die eigentlich
+            // gesuchte Messgroesse (wie lange braucht ein Frame nach dem Moduswechsel wirklich).
+            fun pollUntilFileReady(lastSize: Long, pollCount: Int) {
+                val currentSize = if (frameFile.exists()) frameFile.length() else -1L
+                val stable = currentSize > 0 && currentSize == lastSize
+                if (stable || pollCount >= FRAME_READ_POLL_MAX_ATTEMPTS) {
+                    val elapsedMs = System.currentTimeMillis() - switchStartMs
+                    val waitedForFileMs = System.currentTimeMillis() - requestSentMs
+                    val sharpness = measureSharpness(frameFile, camera)
+                    frameFile.delete()
+                    if (sharpness != null) {
+                        Log.i(TAG, "diagnoseModeSwitchSettleTime($camera): Frame $index: Schaerfe=$sharpness, +${elapsedMs}ms seit Moduswechsel (Datei-Schreibzeit ${waitedForFileMs}ms, $pollCount Polls)")
+                    } else {
+                        Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): Frame $index: kein lesbares Bild, +${elapsedMs}ms seit Moduswechsel (Datei-Schreibzeit ${waitedForFileMs}ms, $pollCount Polls, stable=$stable)")
+                    }
+                    captureFrame(index + 1)
                 } else {
-                    Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): Frame $index: kein lesbares Bild, +${elapsedMs}ms seit Moduswechsel")
+                    mainHandler.postDelayed({ pollUntilFileReady(currentSize, pollCount + 1) }, FRAME_READ_POLL_DELAY_MS)
                 }
-                captureFrame(index + 1)
-            }, FRAME_READ_POLL_DELAY_MS)
+            }
+            mainHandler.postDelayed({ pollUntilFileReady(-1L, 0) }, FRAME_READ_POLL_DELAY_MS)
         }
         captureFrame(0)
     }

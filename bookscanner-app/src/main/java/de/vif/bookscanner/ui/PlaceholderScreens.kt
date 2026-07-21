@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -94,10 +96,17 @@ private fun PlaceholderScaffold(
     description: String,
     content: @Composable () -> Unit
 ) {
+    // verticalScroll: ohne das ragte der PreviewScreen-Inhalt (UvcPreview erzwingt per
+    // setAspectRatio eine groessere Hoehe als die angeforderten 240dp) unten aus dem
+    // Bildschirm heraus — "Rotate 180°" und "Recalibrate / Setup" waren dann zwar in der
+    // Compose-Baumreihenfolge vorhanden, aber ausserhalb des sichtbaren/antippbaren Bereichs
+    // (live gefunden: ein Tap auf die vermutete "Capture"-Position traf tatsaechlich
+    // "Recalibrate / Setup", weil nur die LETZTEN beiden Buttons ueberhaupt im Viewport lagen).
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {

@@ -99,6 +99,36 @@ fun PreviewScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
             Button(onClick = { viewModel.start_setup() }) {
                 Text("Einstellungen")
             }
+
+            // BUGFIX 2026-07-21 (siehe ScannerViewModel.start_capture-Kommentar): Fortschritt
+            // als Overlay HIER statt als eigener CaptureScreen — ein Screen-Wechsel wuerde
+            // die gerade aktiven UvcPreview-Surfaces mitten im Voll-Aufloesungs-Capture
+            // zerstoeren und den nativen Stream abbrechen lassen.
+            if (viewModel.captureInProgress) {
+                Text(
+                    "AUFNAHME LÄUFT — NICHT BEWEGEN",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.titleSmall
+                )
+                val total = viewModel.captureTotalCount
+                val done = viewModel.captureCompletedCount
+                if (total > 1) {
+                    LinearProgressIndicator(
+                        progress = { if (total > 0) done.toFloat() / total else 0f },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                Text("$done von $total Kameras fertig", color = Color.White)
+                CameraSelection.entries.forEach { camera ->
+                    val finished = camera in viewModel.captureFinishedCameras
+                    Text(
+                        text = if (finished) "Kamera $camera: ✓ fertig" else "Kamera $camera: läuft ...",
+                        color = if (finished) MaterialTheme.colorScheme.primary else Color.White
+                    )
+                }
+            }
         }
     }
 }

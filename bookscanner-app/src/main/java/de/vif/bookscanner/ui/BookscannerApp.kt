@@ -36,9 +36,15 @@ fun BookscannerApp(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
             ScannerState.CALIBRATION -> CalibrationScreen(viewModel, cameraBridge)
             ScannerState.LOCK -> LockScreen(viewModel)
             ScannerState.PREVIEW -> PreviewScreen(viewModel, cameraBridge)
-            // cameraBridge auch hier: CaptureScreen MUSS die UvcPreviews beider Kameras
-            // eingebettet behalten, sonst stirbt die TextureView-Surface mitten im Capture
-            // (Root-Cause-Fix 2026-07-21, siehe CaptureScreen-Kommentar).
+            // KORREKTUR 2026-07-21: der fruehere "Root-Cause-Fix" (CaptureScreen behaelt
+            // eigene UvcPreviews) loeste das Problem NICHT — ein Screen-WECHSEL selbst
+            // zerstoert bereits PreviewScreens AndroidView/TextureView, unabhaengig davon
+            // was der neue Screen rendert (native Log bewies: konkurrierender zweiter
+            // startPreview()-Aufruf waehrend des Voll-Aufloesungs-Captures). Tatsaechlicher
+            // Fix: ScannerViewModel.start_capture() wechselt state nicht mehr auf CAPTURE,
+            // dieser Zweig wird dadurch nie mehr erreicht (Fortschritt zeigt PreviewScreen
+            // jetzt selbst als Overlay). CaptureScreen bleibt nur als exhaustive-when-
+            // Pflichtzweig bestehen.
             ScannerState.CAPTURE -> CaptureScreen(viewModel, cameraBridge)
             ScannerState.RECHECK -> RecheckScreen(viewModel)
             ScannerState.SETUP -> SettingsScreen(viewModel, cameraBridge)

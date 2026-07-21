@@ -282,7 +282,24 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             return
         }
 
-        state = ScannerState.CAPTURE
+        // BUGFIX 2026-07-21 (Root-Cause der 0-Byte-Captures, per nativem Log verifiziert):
+        // state = ScannerState.CAPTURE wurde HIER gesetzt, was Compose sofort von
+        // PreviewScreen auf CaptureScreen umschaltet — auch wenn beide Screens UvcPreview
+        // einbetten, sind es unterschiedliche Stellen im Composable-Baum, Compose disposed
+        // also PreviewScreens AndroidView/TextureView und erzeugt eine neue fuer
+        // CaptureScreen. Das zerstoert den Surface MITTEN im laufenden Voll-Aufloesungs-
+        // Capture. Native Log-Beweis: waehrend Kamera-Thread A den 4656x3496-Capture
+        // faehrt, feuert exakt in diesem Fenster ein ZWEITER, konkurrierender
+        // startPreview()-Aufruf (640x480) fuer DIESELBE physische Kamera auf einem eigenen
+        // nativen Thread (onSurfaceCreated der neuen CaptureScreen-View trifft auf
+        // handler.isOpened==true und startet die Preview sofort neu) — zwei gleichzeitige
+        // Streams derselben Kamera sorgen dafuer, dass der Capture-Thread nie einen
+        // vollstaendigen Frame bekommt ("too few scanlines" endlos, unabhaengig von
+        // Aufloesung/Bandbreite/Zweitkamera — all das waren Trugschluesse aus vorherigen
+        // Untersuchungen dieser Session). Fix: State bleibt waehrend der gesamten Aufnahme
+        // auf PREVIEW (PreviewScreens eigene UvcPreview-Instanzen bleiben unangetastet
+        // gebunden), der Fortschritt wird stattdessen als Overlay INNERHALB von
+        // PreviewScreen angezeigt (siehe dortiger captureInProgress-Block).
         captureInProgress = true
         val capturedThisRound = mutableListOf<File>()
         captureTotalCount = connectedCameras.size

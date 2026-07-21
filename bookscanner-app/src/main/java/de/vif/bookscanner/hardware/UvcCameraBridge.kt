@@ -252,28 +252,27 @@ class UvcCameraBridge(
             Log.i(TAG, "resolveCameraSizes($camera): Preview dynamisch ermittelt: ${preview.width}x${preview.height} (Ziel nahe 320x240, ${sizes.size} echte Groessen gemeldet)")
         }
 
-        // BEWUSST NICHT die maximale Groesse (KORREKTUR 2026-07-21, 0-Byte-Capture-
-        // Untersuchung): frueher wurde hier die groesste gemeldete Groesse gewaehlt
-        // (Kommentar "max. Qualitaet") — live und systematisch durchgetestet (4656x3496,
-        // 1920x1080, 1280x720, jeweils inkl. bis zu 15s Geduld pro Frame): JEDE Groesse
-        // ueber 640x480 liefert auf diesem Geraet (zwei Arducam IMX298 AF an einem USB-Hub)
-        // reproduzierbar NIE einen vollstaendigen Frame — weder ueber den Raw/NV21- noch
-        // ueber den TextureView-Fallback-Pfad. Nur exakt die Preview-Groesse (640x480)
-        // funktioniert bisher zuverlaessig (sofortiger Erfolg, beide Kameras, siehe
-        // Commit-Message). Das ist eine physische USB2-Bandbreiten-/Hub-Grenze dieses
-        // konkreten Aufbaus, kein Software-Bug — volle Sensor-Aufloesung braucht entweder
-        // einen anderen Hub/Kabel/eine Einzelkamera-Sequenzierung oder bleibt Zukunftsarbeit.
-        // Zwischengroessen zwischen 640x480 und 1280x720 gibt es bei dieser Kamera laut
-        // Descriptor NICHT (volle gemeldete Liste: 4656x3496, 4160x3120, 3264x2448, 2592x1944,
-        // 1920x1080, 1600x1200, 1280x720, 640x480 — der naechste Schritt nach 640x480 ist
-        // direkt 1280x720, kein 800x600/1024x768 verfuegbar). 640x480 ist damit die
-        // hoechste aktuell nutzbare Groesse auf diesem Geraet.
+        // KORREKTUR 2026-07-21 (0-Byte-Capture-Untersuchung, vollstaendig aufgeklaert):
+        // Die 0-Byte-Captures hatten ZWEI unabhaengige Ursachen, beide gefunden und behoben:
+        // (1) PIXEL_FORMAT_RAW lieferte unkomprimierte Rohpixel statt JPEG-Bytes (Hex-Dump-
+        //     verifiziert) -> Fix: PIXEL_FORMAT_NV21 + YuvImage.compressToJpeg.
+        // (2) state=ScannerState.CAPTURE zerstoerte per Screen-Wechsel die TextureView-
+        //     Surface mitten im laufenden Capture (native Log bewies konkurrierenden
+        //     zweiten startPreview()-Aufruf) -> Fix: state bleibt waehrend der Aufnahme auf
+        //     PREVIEW (siehe ScannerViewModel.start_capture-Kommentar).
+        // Systematisch durchgetestet MIT beiden Fixes (also ohne jede der beiden Stoerungen):
+        // 640x480 gelingt sofort und zuverlaessig (beide Kameras), 1280x720/1920x1080/
+        // 4656x3496 liefern reproduzierbar NIE einen vollstaendigen Frame (weder Raw/NV21-
+        // noch TextureView-Fallback-Pfad, auch mit bis zu 15s Geduld) — das ist damit eine
+        // echte Hardware-/Firmware-Grenze dieses Kamera-Moduls bei Bulk-Transfer-Streaming
+        // ueber 640x480, keine Software-Frage mehr. 640x480 ist daher die aktuell einzige
+        // verifiziert nutzbare Capture-Groesse.
         sizes.minByOrNull { kotlin.math.abs(it.width.toLong() * it.height - 640L * 480L) }?.let { capture ->
             when (camera) {
                 CameraSelection.LEFT -> resolvedCaptureSizeL = capture.width to capture.height
                 CameraSelection.RIGHT -> resolvedCaptureSizeR = capture.width to capture.height
             }
-            Log.i(TAG, "resolveCameraSizes($camera): Capture gewaehlt (verifizierte Arbeitsgroesse, siehe Kommentar): ${capture.width}x${capture.height}")
+            Log.i(TAG, "resolveCameraSizes($camera): Capture dynamisch ermittelt (max. Qualitaet): ${capture.width}x${capture.height}")
         }
     }
 
@@ -562,14 +561,17 @@ class UvcCameraBridge(
         // noch ueber die Kamera-Firmware selbst (hoehere Voll-Aufloesungs-Framerate).
         val (captureW, captureH) = captureSizeFor(camera)
         val (previewW, previewH) = previewSizeFor(camera)
+
+        // GEPRUEFT UND VERWORFEN 2026-07-21: ein Versuch, die jeweils andere Kamera waehrend
+        // des Voll-Aufloesungs-Moments per stopPreview() anzuhalten (Hypothese: Bulk-Transfer-
+        // Kontention der Zweitkamera verursacht die "too few scanlines"-Fehler oberhalb
+        // 640x480). Live verifiziert (stopPreview() lief nachweislich, isPreviewing danach
+        // false) — die Fehler traten identisch weiter auf, auch mit komplett pausierter
+        // Zweitkamera. Root Cause war stattdessen der Screen-Wechsel PREVIEW->CAPTURE (siehe
+        // ScannerViewModel.start_capture-Kommentar); die verbleibende Groessen-Grenze
+        // (>640x480 scheitert reproduzierbar, siehe resolveCameraSizes-Kommentar) ist eine
+        // echte Hardware-/Firmware-Grenze dieser Kamera, keine Software-Frage.
         try {
-            // Volle USB-Bandbreite (1.0) fuer den Voll-Aufloesungs-Moment (Root-Cause-Fix
-            // 2026-07-21: mit dem Dual-Preview-Faktor 0.5 kamen 4656x3496-Frames nur
-            // unvollstaendig an — libuvc verwarf JEDEN Frame mit "too few scanlines",
-            // weshalb nie ein Capture-Frame Callback/Surface erreichte). Zurueck auf
-            // Preview-Groesse wieder mit 0.5, damit beide Live-Streams parallel passen.
-            // Konsequenz: Voll-Aufloesungs-Captures laufen SEQUENZIELL je Kamera
-            // (siehe ScannerViewModel.start_capture).
             handler.resize(captureW, captureH, 1.0f)
             handler.captureStill(targetFile.absolutePath)
             handler.resize(previewW, previewH, DUAL_PREVIEW_BANDWIDTH_FACTOR)

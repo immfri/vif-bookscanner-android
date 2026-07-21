@@ -64,7 +64,14 @@ import java.nio.ByteOrder;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 
-abstract class AbstractUVCCameraHandler extends Handler {
+// ERGAENZUNG (vif-bookscanner, 2026-07-21): von package-private auf public angehoben, damit
+// Kotlin-Code ausserhalb dieses Packages (z.B. UvcCameraBridge.kt) das oeffentliche
+// CameraCallback-Interface (siehe unten) inkl. dessen onOpen()-Callback nutzen kann. javac
+// erlaubte den Zugriff frueher indirekt ueber die public-Subklasse UVCCameraHandler (Java-
+// Member-Vererbungs-Regel), Kotlin's stricterer Modul-Sichtbarkeits-Check lehnt das jedoch ab
+// ("Cannot access 'AbstractUVCCameraHandler': it is package-private"). Reine Sichtbarkeits-
+// Erweiterung, keine Verhaltensaenderung.
+public abstract class AbstractUVCCameraHandler extends Handler {
 	private static final boolean DEBUG = true;	// TODO set false on release
 	private static final String TAG = "AbsUVCCameraHandler";
 

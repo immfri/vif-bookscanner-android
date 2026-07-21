@@ -1,7 +1,10 @@
 package de.vif.bookscanner.hardware
 
 import android.app.Activity
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Rect
+import android.graphics.RectF
 import android.hardware.usb.UsbDevice
 import android.os.Handler
 import android.os.Looper
@@ -76,6 +79,31 @@ class UvcCameraBridge(
          * erreichte Wert ausgelesen und Auto abgeschaltet (fixiert) wird. Ungetestet mit
          * echter Kamera, konservativ gewaehlt. */
         private const val AUTO_CALIBRATION_SETTLE_DELAY_MS = 1200L
+
+        /** Fokus-Sweep (Punkt 1, Kalibrier-Architektur 2026-07-21): Schrittweite auf der
+         * 0..100-Skala (siehe [UvcControlSet]-Kommentar — [UVCCamera.setFocus]/getFocus()
+         * rechnen intern bereits auf den echten Hardware-Min..Max-Bereich um). */
+        private const val FOCUS_SWEEP_STEP_PERCENT = 5
+
+        /** Einschwingzeit pro Sweep-Schritt bevor die Schaerfe gemessen wird. Ungetestet,
+         * konservativ — siehe Punkt 4 (Frame-Settle-Diagnose) fuer den empirischen Weg,
+         * diesen Wert spaeter zu verkuerzen. */
+        private const val FOCUS_SWEEP_STEP_SETTLE_MS = 200L
+
+        /** Suchfenster (in Fokus-Prozentpunkten) fuer die lokale Korrektur um den zuletzt
+         * bekannten Peak bei Toleranzband-Unterschreitung (siehe [correctFocusUsingCurve]) —
+         * kein voller Re-Sweep, nur Nachbarschaftssuche in der gespeicherten Kurve. */
+        private const val FOCUS_LOCAL_SEARCH_WINDOW_PERCENT = 15
+
+        /** Frame-Settle-Diagnose (Punkt 4): Wartezeit VOR dem allerersten Diagnose-Frame nach
+         * dem resize()-Aufruf, damit der Handler den Moduswechsel ueberhaupt entgegennehmen
+         * kann. Danach werden die Frames OHNE weitere Wartezeit angefordert (das ist ja gerade
+         * die Messgroesse). */
+        /** Minimale technische Wartezeit zwischen zwei Diagnose-Frame-Anforderungen, NUR damit
+         * die native Schreib-Pipeline die Datei lesbar fertigstellt — keine Settle-Annahme
+         * ueber Bildqualitaet (das ist ja genau der Messwert, den [diagnoseModeSwitchSettleTime]
+         * ermitteln soll). Absichtlich sehr kurz gehalten. */
+        private const val FRAME_READ_POLL_DELAY_MS = 30L
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -99,6 +127,44 @@ class UvcCameraBridge(
     // die Verbindung stillschweigend zu verlieren.
     private var pendingCtrlBlockL: UsbControlBlock? = null
     private var pendingCtrlBlockR: UsbControlBlock? = null
+
+    // Regionsbezogene Schaerfemessung (Punkt 2, 2026-07-21): optionaler Bildausschnitt pro
+    // Kamera-Slot, aus dem im Live-Feed herangezoomten/ausgewaehlten Bereich abgeleitet (siehe
+    // SettingsScreen.LiveFeedPinchZoom). null = Vollbild (Default-/Rueckwaertskompatibles
+    // Verhalten). WICHTIG: Koordinaten sind FRAKTIONAL (0f..1f relativ zur jeweiligen
+    // Bild-Breite/Hoehe), NICHT in absoluten Pixeln — Sweep/Kalibrierung messen in voller
+    // Capture-Aufloesung, die Pro-Aufnahme-Schnellpruefung in Preview-Aufloesung (Punkt 3);
+    // ein fraktionaler Bereich ist in beiden Aufloesungen gueltig, ein absoluter Pixel-Wert waere
+    // es nicht (siehe [cropRectFor], das den Bruchteil erst am tatsaechlichen Bitmap umrechnet).
+    private val focusRegionCrop = mutableMapOf<CameraSelection, RectF?>()
+
+    /** Setzt/loescht den (fraktionalen) Bildausschnitt fuer die regionsbezogene Schaerfemessung
+     * (Fokus-Sweep + Pro-Aufnahme-Checks) dieser Kamera. Wird von der UI (Pinch-Zoom-Zustand)
+     * NAEHERUNGSWEISE aus dem Zoom/Pan des Live-Feeds berechnet — siehe Kommentar in
+     * SettingsScreen.kt zur dortigen Vereinfachung/Annahme. null = wieder Vollbild verwenden. */
+    fun setFocusRegion(camera: CameraSelection, fractionalCrop: RectF?) {
+        focusRegionCrop[camera] = fractionalCrop
+    }
+
+    fun getFocusRegion(camera: CameraSelection): RectF? = focusRegionCrop[camera]
+
+    /** Rechnet den fraktionalen Bildausschnitt fuer [camera] auf die tatsaechlichen Pixel-
+     * Dimensionen von [bitmap] um (funktioniert dadurch unabhaengig davon, ob [bitmap] in
+     * Preview- oder Capture-Aufloesung vorliegt). null falls kein Ausschnitt gesetzt ist. */
+    private fun cropRectFor(camera: CameraSelection, bitmap: Bitmap): Rect? {
+        val f = focusRegionCrop[camera] ?: return null
+        val left = (f.left * bitmap.width).toInt()
+        val top = (f.top * bitmap.height).toInt()
+        val right = (f.right * bitmap.width).toInt()
+        val bottom = (f.bottom * bitmap.height).toInt()
+        return Rect(left, top, right, bottom)
+    }
+
+    /** Aktuelle Preview-Aufloesung (fuer die naeherungsweise Crop-Rect-Umrechnung in der UI). */
+    fun getPreviewSize(): Pair<Int, Int> = previewWidth to previewHeight
+
+    /** Volle Capture-Aufloesung (fuer die naeherungsweise Crop-Rect-Umrechnung in der UI). */
+    fun getCaptureSize(): Pair<Int, Int> = CAPTURE_WIDTH to CAPTURE_HEIGHT
 
     /** Muss vor [register] aufgerufen werden, sobald die Compose-AndroidView bereit ist. */
     fun bindCameraView(camera: CameraSelection, view: CameraViewInterface) {
@@ -261,6 +327,10 @@ class UvcCameraBridge(
             return
         }
 
+        // Fruehwarnung/-korrektur (Punkt 3) auf dem aktuellen Preview-Frame, BEVOR der teure
+        // Mode-Switch ueberhaupt beginnt — siehe [quickPreviewFocusCheck].
+        quickPreviewFocusCheck(camera)
+
         try {
             handler.resize(CAPTURE_WIDTH, CAPTURE_HEIGHT)
         } catch (e: Exception) {
@@ -290,15 +360,83 @@ class UvcCameraBridge(
     }
 
     /**
+     * Diagnose-Modus (Punkt 4): schaltet auf Capture-Aufloesung und nimmt danach [frameCount]
+     * Frames HINTEREINANDER auf, OHNE Wartezeit dazwischen (die feste [CAPTURE_SETTLE_DELAY_MS]
+     * wird hier bewusst NICHT verwendet — genau die ist ja die zu ueberpruefende Annahme). Fuer
+     * jeden Frame wird Schaerfe + Zeitstempel seit dem resize()-Aufruf geloggt
+     * ("Frame N: Schaerfe=X, +Yms seit Moduswechsel"). Ziel: den echten minimalen Settle-Wert
+     * empirisch ermitteln statt zu raten (siehe [CAPTURE_SETTLE_DELAY_MS]-Kommentar — 400ms ist
+     * ein ungetesteter Platzhalter). Schaltet am Ende zurueck auf Preview-Aufloesung.
+     *
+     * Reiner Debug-/Messwerkzeug-Code — der User wertet das Logcat-Ergebnis beim naechsten
+     * Live-Test aus, diese Funktion liefert selbst keine Entscheidung/Anpassung von
+     * [CAPTURE_SETTLE_DELAY_MS] (das waere Raten ohne echte Geraetedaten).
+     */
+    fun diagnoseModeSwitchSettleTime(camera: CameraSelection, frameCount: Int = 10) {
+        val handler = handlerFor(camera)
+        if (handler == null || !handler.isOpened) {
+            Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): Kamera nicht geoeffnet, Diagnose abgebrochen")
+            return
+        }
+        Log.i(TAG, "diagnoseModeSwitchSettleTime($camera): starte Moduswechsel auf ${CAPTURE_WIDTH}x$CAPTURE_HEIGHT, $frameCount Frames ohne Wartezeit")
+        val switchStartMs = System.currentTimeMillis()
+        try {
+            handler.resize(CAPTURE_WIDTH, CAPTURE_HEIGHT)
+        } catch (e: Exception) {
+            Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): resize fehlgeschlagen, Diagnose abgebrochen", e)
+            return
+        }
+
+        fun captureFrame(index: Int) {
+            if (index >= frameCount) {
+                try {
+                    handler.resize(previewWidth, previewHeight)
+                } catch (e: Exception) {
+                    Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): resize zurueck auf Preview fehlgeschlagen", e)
+                }
+                Log.i(TAG, "diagnoseModeSwitchSettleTime($camera): fertig, zurueck auf Preview-Aufloesung")
+                return
+            }
+            val frameFile = File(activity.cacheDir, "settle_diag_${camera}_${index}.jpg")
+            try {
+                handler.captureStill(frameFile.absolutePath)
+            } catch (e: Exception) {
+                Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): captureStill Frame $index fehlgeschlagen", e)
+            }
+            // Bewusst KEINE Wartezeit vor dem naechsten captureStill-Aufruf (schnellstmoegliche
+            // Frame-Anforderung ist genau der Test) — nur eine minimale Verzoegerung, damit die
+            // native Schreib-Pipeline die vorherige Datei fertigstellen kann, bevor sie gelesen
+            // wird (reine Mess-Notwendigkeit, keine Settle-Annahme fuer die Bildqualitaet).
+            mainHandler.postDelayed({
+                val elapsedMs = System.currentTimeMillis() - switchStartMs
+                val sharpness = measureSharpness(frameFile, camera)
+                frameFile.delete()
+                if (sharpness != null) {
+                    Log.i(TAG, "diagnoseModeSwitchSettleTime($camera): Frame $index: Schaerfe=$sharpness, +${elapsedMs}ms seit Moduswechsel")
+                } else {
+                    Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): Frame $index: kein lesbares Bild, +${elapsedMs}ms seit Moduswechsel")
+                }
+                captureFrame(index + 1)
+            }, FRAME_READ_POLL_DELAY_MS)
+        }
+        captureFrame(0)
+    }
+
+    /**
      * Automodus-Kalibrierung: schaltet Auto-Fokus + Auto-Weissabgleich EIN, wartet auf
      * Einschwingen, liest dann die tatsaechlich erreichten Werte aus und schaltet Auto
-     * wieder AB — der ausgelesene Wert wird explizit erneut gesetzt (fixiert/eingefroren).
-     * Kein Nachlaufen zwischen einzelnen Aufnahmen (Vorgabe: maximale OCR-Qualitaet, ein
-     * "wandernder" Fokus wuerde das sabotieren).
+     * wieder AB. Fuehrt DANACH einen vollstaendigen Fokus-Sweep (Punkt 1) in voller
+     * Capture-Aufloesung durch (Mode-Switch, siehe [captureFullResolutionThenReturnToPreview]):
+     * der native Auto-Fokus-Endwert dient nur als Startpunkt, der tatsaechliche Schaerfe-Peak
+     * aus der gemessenen Fokus->Schaerfe-Kurve wird als endgueltiger fixierter Fokuswert
+     * uebernommen (praeziser als der reine Autofokus-Regelkreis-Endwert). Kein Nachlaufen
+     * zwischen einzelnen Aufnahmen (Vorgabe: maximale OCR-Qualitaet).
      *
-     * Nimmt danach zusaetzlich einen Referenz-Still auf (in den App-Cache, wird wieder
-     * geloescht) und misst dessen Schaerfe ([SharpnessAnalyzer]) als Referenzwert fuer die
-     * Pro-Aufnahme-Verifikation ([verifyFocusAfterCapture]). Ergebnis wird persistiert.
+     * Referenz-Schaerfewerte: [UvcControlSet.referenceSharpness] aus dem Sweep-Peak (volle
+     * Aufloesung), zusaetzlich EIN weiterer Preview-Aufloesungs-Still fuer
+     * [UvcControlSet.referenceSharpnessPreview] (Punkt 3, zweistufige Messung — kein
+     * Modus-Wechsel mehr noetig, da nach dem Sweep bereits zurueck auf Preview geschaltet ist).
+     * Beide Werte + die volle Kurve werden persistiert.
      */
     fun calibrateAuto(camera: CameraSelection, onResult: (UvcControlSet) -> Unit) {
         val handler = handlerFor(camera)
@@ -336,21 +474,164 @@ class UvcCameraBridge(
                 null
             } ?: return@postDelayed
 
-            // Referenz-Still fuer die Schaerfe-Baseline aufnehmen (App-Cache, temporaer).
-            val refFile = File(activity.cacheDir, "calibration_ref_${camera}_${System.currentTimeMillis()}.jpg")
+            // Ab hier: voller Fokus-Sweep in Capture-Aufloesung (Punkt 1). Mode-Switch einmal
+            // hoch, alle Sweep-Schritte darin, dann einmal zurueck (statt pro Schritt zu
+            // wechseln — deutlich schneller, volle Aufloesung ist trotzdem waehrend des
+            // gesamten Sweeps aktiv).
             try {
-                handler.captureStill(refFile.absolutePath)
+                handler.resize(CAPTURE_WIDTH, CAPTURE_HEIGHT)
             } catch (e: Exception) {
-                Log.w(TAG, "calibrateAuto($camera): Referenz-Still fehlgeschlagen, referenceSharpness bleibt 0.0", e)
+                Log.w(TAG, "calibrateAuto($camera): resize auf Capture-Aufloesung fuer Sweep fehlgeschlagen", e)
             }
+
             mainHandler.postDelayed({
-                val referenceSharpness = measureSharpness(refFile) ?: 0.0
-                refFile.delete()
-                val result = fixed.copy(referenceSharpness = referenceSharpness)
-                controlPrefs.save(camera, result)
-                onResult(result)
+                runFocusSweep(camera) { curve ->
+                    val peak = curve.maxByOrNull { it.second }
+                    val peakFocus = peak?.first ?: fixed.focus
+                    val peakSharpness = peak?.second ?: 0.0
+                    try {
+                        handler.setValue(UVCCamera.CTRL_FOCUS_ABS, peakFocus)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "calibrateAuto($camera): Setzen des Sweep-Peak-Fokus fehlgeschlagen", e)
+                    }
+
+                    try {
+                        handler.resize(previewWidth, previewHeight)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "calibrateAuto($camera): resize zurueck auf Preview-Aufloesung fehlgeschlagen", e)
+                    }
+
+                    // Zweiter, EIGENER Referenzwert in Preview-Aufloesung (Punkt 3) — kein
+                    // weiterer Modus-Wechsel mehr noetig, wir sind bereits zurueck auf Preview.
+                    mainHandler.postDelayed({
+                        val previewRefFile = File(activity.cacheDir, "calibration_ref_preview_${camera}_${System.currentTimeMillis()}.jpg")
+                        try {
+                            handler.captureStill(previewRefFile.absolutePath)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "calibrateAuto($camera): Preview-Referenz-Still fehlgeschlagen, referenceSharpnessPreview bleibt 0.0", e)
+                        }
+                        mainHandler.postDelayed({
+                            val referenceSharpnessPreview = measureSharpness(previewRefFile, camera) ?: 0.0
+                            previewRefFile.delete()
+
+                            val result = fixed.copy(
+                                focus = peakFocus,
+                                referenceSharpness = peakSharpness,
+                                referenceSharpnessPreview = referenceSharpnessPreview,
+                                focusSweepCurve = curve
+                            )
+                            controlPrefs.save(camera, result)
+                            onResult(result)
+                        }, FOCUS_SWEEP_STEP_SETTLE_MS)
+                    }, CAPTURE_SETTLE_DELAY_MS)
+                }
             }, CAPTURE_SETTLE_DELAY_MS)
         }, AUTO_CALIBRATION_SETTLE_DELAY_MS)
+    }
+
+    /**
+     * Fuehrt den eigentlichen Fokus-Sweep durch (Punkt 1): faehrt die Fokus-Skala 0..100 in
+     * Schritten von [FOCUS_SWEEP_STEP_PERCENT] ab, misst pro Schritt die Schaerfe (optional
+     * nur im Bildausschnitt aus [focusRegionCrop], siehe Punkt 2 — regionsbezogene Messung)
+     * und ruft [onDone] mit der kompletten (Fokuswert, Schaerfe)-Liste auf, sobald fertig.
+     * MUSS aufgerufen werden waehrend die Kamera bereits in Capture-Aufloesung steht — dieser
+     * Aufruf selbst macht keinen resize().
+     */
+    private fun runFocusSweep(camera: CameraSelection, onDone: (List<Pair<Int, Double>>) -> Unit) {
+        val handler = handlerFor(camera)
+        if (handler == null || !handler.isOpened) {
+            onDone(emptyList())
+            return
+        }
+        val steps = (0..100 step FOCUS_SWEEP_STEP_PERCENT).toList()
+        val curve = mutableListOf<Pair<Int, Double>>()
+
+        fun stepAt(index: Int) {
+            if (index >= steps.size) {
+                onDone(curve)
+                return
+            }
+            val focusValue = steps[index]
+            try {
+                handler.setValue(UVCCamera.CTRL_FOCUS_ABS, focusValue)
+            } catch (e: Exception) {
+                Log.w(TAG, "runFocusSweep($camera): setValue bei Schritt $focusValue fehlgeschlagen", e)
+            }
+            mainHandler.postDelayed({
+                val stepFile = File(activity.cacheDir, "focus_sweep_${camera}_${focusValue}.jpg")
+                try {
+                    handler.captureStill(stepFile.absolutePath)
+                } catch (e: Exception) {
+                    Log.w(TAG, "runFocusSweep($camera): captureStill bei Schritt $focusValue fehlgeschlagen", e)
+                }
+                mainHandler.postDelayed({
+                    val sharpness = measureSharpness(stepFile, camera) ?: 0.0
+                    stepFile.delete()
+                    curve.add(focusValue to sharpness)
+                    stepAt(index + 1)
+                }, FOCUS_SWEEP_STEP_SETTLE_MS)
+            }, FOCUS_SWEEP_STEP_SETTLE_MS)
+        }
+        stepAt(0)
+    }
+
+    /**
+     * Lokale Korrektursuche in der gespeicherten Fokus-Sweep-Kurve (Punkt 1, Nutzen bei der
+     * Pro-Aufnahme-Verifikation): sucht statt eines vollen Re-Sweeps oder blinden Retries nur
+     * in einem Fenster von +/- [FOCUS_LOCAL_SEARCH_WINDOW_PERCENT] um den aktuell fixierten
+     * Fokuswert nach dem lokal besten (schaerfsten) bekannten Kurvenpunkt. Faellt auf die
+     * gesamte Kurve zurueck falls das Fenster leer ist. null falls noch nie ein Sweep lief.
+     */
+    private fun correctFocusUsingCurve(controls: UvcControlSet): Int? {
+        if (controls.focusSweepCurve.isEmpty()) return null
+        val current = controls.focus
+        val window = controls.focusSweepCurve.filter {
+            kotlin.math.abs(it.first - current) <= FOCUS_LOCAL_SEARCH_WINDOW_PERCENT
+        }.ifEmpty { controls.focusSweepCurve }
+        return window.maxByOrNull { it.second }?.first
+    }
+
+    /**
+     * Schnelle Vor-Aufnahme-Pruefung (Punkt 3, zweistufige Messung): misst die Schaerfe des
+     * AKTUELLEN Live-Preview-Frames (ueber [CameraViewInterface.captureStillImage], synchron,
+     * KEIN Modus-Wechsel, KEINE Datei) und vergleicht sie gegen
+     * [UvcControlSet.referenceSharpnessPreview]. Bei Unterschreitung wird — falls Auto-Retry
+     * aktiv und eine Sweep-Kurve vorliegt — sofort per lokaler Kurvensuche korrigiert
+     * ([correctFocusUsingCurve]), BEVOR ueberhaupt der teure Capture-Mode-Switch beginnt.
+     * Reiner Optimierungs-/Fruehwarn-Schritt — die eigentliche, autoritative Pruefung bleibt
+     * [verifyFocusAfterCapture] auf dem tatsaechlich gespeicherten Vollaufloesungs-Bild.
+     */
+    private fun quickPreviewFocusCheck(camera: CameraSelection) {
+        val controls = controlPrefs.load(camera)
+        if (controls.referenceSharpnessPreview <= 0.0) return // noch nie kalibriert
+        val view = when (camera) {
+            CameraSelection.LEFT -> viewL
+            CameraSelection.RIGHT -> viewR
+        } ?: return
+        val bitmap = try {
+            view.captureStillImage()
+        } catch (e: Exception) {
+            null
+        } ?: return
+        val measured = try {
+            SharpnessAnalyzer.laplacianVariance(bitmap, cropRectFor(camera, bitmap))
+        } finally {
+            bitmap.recycle()
+        }
+        val toleranceBand = controlPrefs.getSharpnessToleranceBandPercent()
+        if (SharpnessAnalyzer.isWithinTolerance(measured, controls.referenceSharpnessPreview, toleranceBand)) {
+            return
+        }
+        Log.w(TAG, "quickPreviewFocusCheck($camera): Preview-Schaerfe $measured unter Referenz ${controls.referenceSharpnessPreview} (Band $toleranceBand%)")
+        if (controlPrefs.getAutoRetryEnabled() && !controls.focusAuto) {
+            val handler = handlerFor(camera)
+            val corrected = correctFocusUsingCurve(controls) ?: controls.focus
+            try {
+                handler?.setValue(UVCCamera.CTRL_FOCUS_ABS, corrected)
+            } catch (e: Exception) {
+                Log.w(TAG, "quickPreviewFocusCheck($camera): Korrektur-Re-Apply fehlgeschlagen", e)
+            }
+        }
     }
 
     /** Schreibt einen kompletten manuellen Parametersatz auf den Treiber (kein Persist hier —
@@ -422,7 +703,7 @@ class UvcCameraBridge(
         val controls = controlPrefs.load(camera)
         if (controls.referenceSharpness <= 0.0) return // noch nie kalibriert, nichts zu vergleichen
 
-        val measured = measureSharpness(capturedFile) ?: return
+        val measured = measureSharpness(capturedFile, camera) ?: return
         val toleranceBand = controlPrefs.getSharpnessToleranceBandPercent()
         if (SharpnessAnalyzer.isWithinTolerance(measured, controls.referenceSharpness, toleranceBand)) {
             return
@@ -430,11 +711,15 @@ class UvcCameraBridge(
 
         Log.w(TAG, "verifyFocusAfterCapture($camera): Schaerfe $measured ausserhalb Toleranz (Referenz ${controls.referenceSharpness}, Band $toleranceBand%)")
         if (controlPrefs.getAutoRetryEnabled() && !controls.focusAuto) {
-            // Fokus einfach erneut fixiert schreiben (Arducam-Fund: Fokuswert kann bei
-            // Erschuetterung/Reconnect verrutschen, expliziter Re-Apply ist der robuste Weg).
+            // Bevorzugt lokale Korrektursuche in der gespeicherten Sweep-Kurve (Punkt 1) —
+            // sagt Richtung/Distanz der Korrektur an statt blind denselben Wert erneut zu
+            // senden. Faellt auf den reinen Re-Apply zurueck, falls (noch) keine Kurve
+            // vorliegt (Arducam-Fund: Fokuswert kann bei Erschuetterung/Reconnect verrutschen,
+            // expliziter Re-Apply ist in jedem Fall der robuste Basis-Weg).
             val handler = handlerFor(camera)
+            val corrected = correctFocusUsingCurve(controls) ?: controls.focus
             try {
-                handler?.setValue(UVCCamera.CTRL_FOCUS_ABS, controls.focus)
+                handler?.setValue(UVCCamera.CTRL_FOCUS_ABS, corrected)
             } catch (e: Exception) {
                 Log.w(TAG, "verifyFocusAfterCapture($camera): Auto-Retry-Re-Apply fehlgeschlagen", e)
             }
@@ -442,15 +727,20 @@ class UvcCameraBridge(
         mainHandler.post { listener.onSharpnessOutOfTolerance(camera, measured, controls.referenceSharpness) }
     }
 
-    private fun measureSharpness(file: File): Double? {
+    /** @param camera falls gesetzt, wird der fuer diese Kamera hinterlegte fraktionale
+     * Bildausschnitt ([focusRegionCrop]/[cropRectFor]) auf die tatsaechliche Groesse von
+     * [file] umgerechnet und angewendet — funktioniert dadurch sowohl fuer Preview- als auch
+     * Capture-Aufloesungs-Dateien. null (Default) = Vollbild. */
+    private fun measureSharpness(file: File, camera: CameraSelection? = null): Double? {
         if (!file.exists()) return null
         val bitmap = try {
             BitmapFactory.decodeFile(file.absolutePath)
         } catch (e: Exception) {
             null
         } ?: return null
+        val cropRect = camera?.let { cropRectFor(it, bitmap) }
         return try {
-            SharpnessAnalyzer.laplacianVariance(bitmap)
+            SharpnessAnalyzer.laplacianVariance(bitmap, cropRect)
         } finally {
             bitmap.recycle()
         }

@@ -751,6 +751,14 @@ abstract class AbstractUVCCameraHandler extends Handler {
 			mSoundPool.play(mSoundId, 0.2f, 0.2f, 0, 0, 1.0f);	// play shutter sound
 			try {
 				final Bitmap bitmap = mWeakCameraView.get().captureStillImage();
+				if (bitmap == null) {
+					// ERGAENZUNG (vif-bookscanner, 2026-07-21): captureStillImage() liefert seit
+					// dem Timeout-Fix null statt unbegrenzt zu blockieren, wenn kein neuer Frame
+					// kam (z.B. Preview nach resize()-Moduswechsel noch nicht wieder aktiv).
+					// Klarer Fehler statt impliziter NullPointerException bei bitmap.compress().
+					callOnError(new IllegalStateException("captureStillImage: kein Bild erhalten (Timeout)"));
+					return;
+				}
 				// get buffered output stream for saving a captured still image as a file on external storage.
 				// the file name is came from current time.
 				// You should use extension name as same as CompressFormat when calling Bitmap#compress.

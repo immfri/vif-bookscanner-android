@@ -60,6 +60,17 @@ public class UVCCameraTextureView extends AspectRatioTextureView    // API >= 14
     private Bitmap mTempBitmap;
     private boolean mReqesutCaptureStillImage;
 	private Callback mCallback;
+	/**
+	 * ERGAENZUNG (vif-bookscanner, 2026-07-21, Fix schwarze Preview nach Kalibrierung):
+	 * maximale Wartezeit in {@link #captureStillImage()} auf den naechsten
+	 * {@link #onSurfaceTextureUpdated(SurfaceTexture)}-Frame. Ohne dieses Timeout blockiert
+	 * {@code mCaptureSync.wait()} unbegrenzt, falls direkt nach einem resize()-Moduswechsel
+	 * (z.B. Kalibrierungs-Referenz-Still in Preview-Aufloesung) kein neuer Frame ankommt —
+	 * das legt den aufrufenden CameraThread dauerhaft lahm, weil dieser Thread auch alle
+	 * kuenftigen startPreview/resize-Nachrichten verarbeitet (Deadlock, kein Modus-Wechsel
+	 * bringt das Bild zurueck).
+	 */
+	private static final long CAPTURE_STILL_IMAGE_TIMEOUT_MS = 2000L;
 	/** for calculation of frame rate */
 	private final FpsCounter mFpsCounter = new FpsCounter();
 
@@ -173,8 +184,19 @@ public class UVCCameraTextureView extends AspectRatioTextureView    // API >= 14
 		synchronized (mCaptureSync) {
 			mReqesutCaptureStillImage = true;
 			try {
-				mCaptureSync.wait();
+				mCaptureSync.wait(CAPTURE_STILL_IMAGE_TIMEOUT_MS);
 			} catch (final InterruptedException e) {
+			}
+			if (mReqesutCaptureStillImage) {
+				// Timeout: onSurfaceTextureUpdated ist nicht innerhalb der Frist gefeuert
+				// (kein neuer Frame, z.B. Preview nach Moduswechsel noch nicht wieder aktiv).
+				// Anfrage zuruecknehmen (sonst "loest" ein spaeter doch noch eintreffender
+				// Frame die laengst verworfene Anfrage nachtraeglich fehlerhaft ein) und null
+				// statt eines potenziell veralteten mTempBitmap liefern.
+				mReqesutCaptureStillImage = false;
+				Log.w(TAG, "captureStillImage: Timeout nach " + CAPTURE_STILL_IMAGE_TIMEOUT_MS
+					+ "ms, kein neuer Frame erhalten");
+				return null;
 			}
 			return mTempBitmap;
 		}

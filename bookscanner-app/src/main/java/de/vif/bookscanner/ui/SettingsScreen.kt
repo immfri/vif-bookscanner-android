@@ -21,6 +21,8 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -55,41 +57,41 @@ fun SettingsScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
         TestCaptureLoopDialog(viewModel = viewModel, onDismiss = { showTestLoopDialog = false })
     }
 
+    // Tab-Struktur (User-Vorgabe 2026-07-21): ein Tab je Kamera (Links/Rechts). Pro Tab:
+    // Live-Feed der jeweiligen Kamera + kameraspezifische Aktionen (180-Grad-Rotation).
+    // Kameras sind physisch nicht per ID unterscheidbar — der globale "L/R tauschen"-Button
+    // wechselt die Slot-Zuordnung, die Rotation korrigiert kopfueber montierte Kameras.
+    var selectedTab by remember { mutableStateOf(0) }
+    val tabCamera = if (selectedTab == 0) CameraSelection.LEFT else CameraSelection.RIGHT
+
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
 
-        // --- Oben: Kamera-Auswahl-Dropdown + Switch-Button ---
+        // --- Oben: Titel + globale Aktionen ---
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Box {
-                OutlinedButton(onClick = { dropdownExpanded = true }) {
-                    Text("Kamera: ${viewModel.activeCamera.label()}")
-                }
-                DropdownMenu(
-                    expanded = dropdownExpanded,
-                    onDismissRequest = { dropdownExpanded = false }
-                ) {
-                    CameraSelection.entries.forEach { camera ->
-                        DropdownMenuItem(
-                            text = { Text(camera.label()) },
-                            onClick = {
-                                if (camera != viewModel.activeCamera) viewModel.swap_cameras()
-                                dropdownExpanded = false
-                            }
-                        )
-                    }
-                }
-            }
-
+            Text("Einstellungen", style = MaterialTheme.typography.titleMedium)
             Button(onClick = { viewModel.swap_cameras() }) {
-                Text("Switch")
+                Text("L/R tauschen")
             }
-
             Button(onClick = { viewModel.finish_setup() }) {
                 Text("Fertig")
             }
+        }
+
+        TabRow(selectedTabIndex = selectedTab, modifier = Modifier.padding(top = 8.dp)) {
+            Tab(
+                selected = selectedTab == 0,
+                onClick = { selectedTab = 0 },
+                text = { Text("Linke Kamera (L)") }
+            )
+            Tab(
+                selected = selectedTab == 1,
+                onClick = { selectedTab = 1 },
+                text = { Text("Rechte Kamera (R)") }
+            )
         }
 
         // --- Split-Layout: Einstellungen links, Live-Feed rechts ---
@@ -105,18 +107,24 @@ fun SettingsScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
                     .padding(end = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text("Einstellungen", style = MaterialTheme.typography.titleMedium)
+                // --- Kameraspezifisch (aktiver Tab) ---
+                val rotated = viewModel.isRotated180(tabCamera)
+                OutlinedButton(onClick = { viewModel.toggle_rotation180(tabCamera) }) {
+                    Text(if (rotated) "Rotation 180° AUS (aktuell: gedreht)" else "Rotation 180° AN (aktuell: normal)")
+                }
+                Text(
+                    "Rotation wirkt auf Live-Anzeige UND gespeicherte JPEGs (verlustfrei " +
+                        "per EXIF-Orientation — Bilddaten bleiben unangetastet).",
+                    style = MaterialTheme.typography.bodySmall
+                )
 
+                // --- Global ---
                 // Projekt/Buch-Verwaltung: Name geht 1:1 ins Dateinamensschema
                 // {Projekt}_S{Seite:04d}_{L|R}.jpg; neuer Name = neues Buch (Seite 1).
                 ProjectSettings(viewModel)
 
-                Text("Orientierung: ${viewModel.orientation}")
-                OutlinedButton(onClick = { viewModel.set_orientation() }) {
-                    Text("Rotate 180°")
-                }
                 // Vollstaendiger UVC-Parametersatz (Auto/Manuell) lebt im eigenen
-                // CalibrationScreen (State CALIBRATION, "Recalibrate"-Button in PREVIEW).
+                // CalibrationScreen (State CALIBRATION).
                 OutlinedButton(onClick = { viewModel.start_calibration() }) {
                     Text("Kalibrierung öffnen")
                 }
@@ -130,7 +138,7 @@ fun SettingsScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
             }
 
             LiveFeedPinchZoom(
-                camera = viewModel.activeCamera,
+                camera = tabCamera,
                 cameraBridge = cameraBridge,
                 viewModel = viewModel,
                 modifier = Modifier
@@ -190,6 +198,7 @@ private fun LiveFeedPinchZoom(
             camera = camera,
             cameraBridge = cameraBridge,
             viewModel = viewModel,
+            rotated180 = viewModel.isRotated180(camera),
             zoomState = UvcPreviewZoomState(
                 scale = scale,
                 translationX = offsetX,

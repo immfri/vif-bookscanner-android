@@ -127,6 +127,11 @@ class UvcCameraBridge(
          * (siehe dortiger Kommentar) — verhindert endloses Warten, falls captureStill() fuer
          * einen Frame nie eine lesbare Datei liefert (z.B. Timeout im nativen Layer). */
         private const val FRAME_READ_POLL_MAX_ATTEMPTS = 60
+
+        /** USB-Bandbreiten-Faktor je Kamera im Dual-Preview-Betrieb (zwei parallele
+         * 320x240-Streams). Fuer Voll-Aufloesungs-Captures wird temporaer 1.0 angefordert
+         * (siehe captureFullResolutionThenReturnToPreview, Root-Cause "too few scanlines"). */
+        const val DUAL_PREVIEW_BANDWIDTH_FACTOR = 0.5f
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -302,7 +307,7 @@ class UvcCameraBridge(
 
         val existing = handlerFor(camera)
         if (existing == null) {
-            val bandwidthFactor = 0.5f // zwei Kameras teilen sich die USB2-Bandbreite (wie usbCameraTest7).
+            val bandwidthFactor = DUAL_PREVIEW_BANDWIDTH_FACTOR // zwei Kameras teilen sich die USB2-Bandbreite (wie usbCameraTest7).
             val newHandler = UVCCameraHandler.createHandler(
                 activity, view, previewWidth, previewHeight, bandwidthFactor
             )
@@ -519,9 +524,16 @@ class UvcCameraBridge(
         val (captureW, captureH) = captureSizeFor(camera)
         val (previewW, previewH) = previewSizeFor(camera)
         try {
-            handler.resize(captureW, captureH)
+            // Volle USB-Bandbreite (1.0) fuer den Voll-Aufloesungs-Moment (Root-Cause-Fix
+            // 2026-07-21: mit dem Dual-Preview-Faktor 0.5 kamen 4656x3496-Frames nur
+            // unvollstaendig an — libuvc verwarf JEDEN Frame mit "too few scanlines",
+            // weshalb nie ein Capture-Frame Callback/Surface erreichte). Zurueck auf
+            // Preview-Groesse wieder mit 0.5, damit beide Live-Streams parallel passen.
+            // Konsequenz: Voll-Aufloesungs-Captures laufen SEQUENZIELL je Kamera
+            // (siehe ScannerViewModel.start_capture).
+            handler.resize(captureW, captureH, 1.0f)
             handler.captureStill(targetFile.absolutePath)
-            handler.resize(previewW, previewH)
+            handler.resize(previewW, previewH, DUAL_PREVIEW_BANDWIDTH_FACTOR)
         } catch (e: Exception) {
             listener.onError(camera, e)
         }
@@ -530,9 +542,50 @@ class UvcCameraBridge(
         handler.post {
             mainHandler.post {
                 applyManualControls(camera, controlPrefs.load(camera))
+                applyExifMetadata(camera, targetFile)
                 verifyFocusAfterCapture(camera, targetFile)
                 onDone()
             }
+        }
+    }
+
+    /** 180-Grad-Rotation je Kamera (User-Vorgabe): persistiert in [UvcControlPrefs],
+     * angewandt auf Live-Vorschau (UI, View.rotation) + gespeicherte JPEGs (EXIF). */
+    fun getRotation180(camera: CameraSelection): Boolean = controlPrefs.getRotation180(camera)
+
+    fun setRotation180(camera: CameraSelection, value: Boolean) {
+        controlPrefs.setRotation180(camera, value)
+    }
+
+    /**
+     * Schreibt EXIF-Metadaten in die gespeicherte JPEG-Datei — VERLUSTFREI: die
+     * komprimierten Bilddaten (Scan-Segmente) bleiben byte-identisch, es wird nur das
+     * Metadaten-Segment ergaenzt/geaendert (User-Vorgabe: keine Neukompression).
+     *
+     * 1. Aufnahme-Zeitstempel (TAG_DATETIME_ORIGINAL, User-Vorgabe: Timestamp gehoert ins
+     *    EXIF, NICHT in den Dateinamen — das rohe Sensor-MJPEG bringt selbst keines mit).
+     * 2. Bei aktiver 180-Grad-Rotation zusaetzlich das Orientation-Flag ROTATE_180 (jeder
+     *    EXIF-konforme Viewer/jede OCR-Pipeline zeigt das Bild damit richtig herum).
+     *
+     * Fehler hier duerfen den Capture nie scheitern lassen — nur Log.
+     */
+    private fun applyExifMetadata(camera: CameraSelection, file: File) {
+        if (!file.exists() || file.length() == 0L) return
+        try {
+            val exif = androidx.exifinterface.media.ExifInterface(file.absolutePath)
+            val timestamp = java.text.SimpleDateFormat("yyyy:MM:dd HH:mm:ss", java.util.Locale.US)
+                .format(java.util.Date())
+            exif.setAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_ORIGINAL, timestamp)
+            exif.setAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME, timestamp)
+            if (controlPrefs.getRotation180(camera)) {
+                exif.setAttribute(
+                    androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+                    androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180.toString()
+                )
+            }
+            exif.saveAttributes()
+        } catch (e: Exception) {
+            Log.w(TAG, "applyExifMetadata($camera): EXIF-Metadaten setzen fehlgeschlagen", e)
         }
     }
 

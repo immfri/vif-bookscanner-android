@@ -47,6 +47,17 @@ class UvcControlPrefs(context: Context) {
         prefs.edit().putBoolean(KEY_AUTO_RETRY, value).apply()
     }
 
+    /** 180-Grad-Rotation je Kamera (User-Vorgabe 2026-07-21): die physischen Kameras sind
+     * nicht per ID unterscheidbar und koennen kopfueber montiert sein — Rotation wird pro
+     * Slot persistiert, auf die Live-Vorschau (View.rotation) UND als verlustfreies
+     * EXIF-Orientation-Flag auf die gespeicherten JPEGs angewandt. */
+    fun getRotation180(camera: CameraSelection): Boolean =
+        prefs.getBoolean("rotation180_$camera", false)
+
+    fun setRotation180(camera: CameraSelection, value: Boolean) {
+        prefs.edit().putBoolean("rotation180_$camera", value).apply()
+    }
+
     companion object {
         private const val PREFS_NAME = "uvc_control_prefs"
         private const val KEY_TOLERANCE_BAND = "sharpness_tolerance_band_percent"

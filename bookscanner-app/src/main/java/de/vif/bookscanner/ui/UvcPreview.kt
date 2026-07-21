@@ -53,7 +53,11 @@ fun UvcPreview(
     cameraBridge: UvcCameraBridge,
     viewModel: ScannerViewModel,
     modifier: Modifier = Modifier,
-    zoomState: UvcPreviewZoomState? = null
+    zoomState: UvcPreviewZoomState? = null,
+    /** 180-Grad-Rotation der Live-Anzeige (Kamera kopfueber montiert) — native
+     * View.rotation, wirkt nur auf die Darstellung; die Datei-Rotation laeuft separat
+     * verlustfrei ueber EXIF (siehe UvcCameraBridge.applyExifRotationIfNeeded). */
+    rotated180: Boolean = false
 ) {
     key(camera) {
         AndroidView(
@@ -70,6 +74,7 @@ fun UvcPreview(
                 view.scaleY = z.scale
                 view.translationX = z.translationX
                 view.translationY = z.translationY
+                view.rotation = if (rotated180) 180f else 0f
             }
         )
     }

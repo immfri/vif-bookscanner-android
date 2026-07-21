@@ -2,13 +2,19 @@ package de.vif.bookscanner.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -38,35 +44,60 @@ fun LockScreen(viewModel: ScannerViewModel) {
     }
 }
 
+/**
+ * Haupt-Scan-Ansicht (State PREVIEW) — UI-Redesign nach User-Vorgabe 2026-07-21:
+ * das KOMPLETTE Display zeigt links + rechts die beiden Live-Streams (L/R, unverzerrt im
+ * 4:3-Seitenverhaeltnis skaliert, jeweils inkl. per-Kamera-180-Grad-Rotation). In der
+ * Mitte entsteht durch die 4:3-Kacheln auf dem 20:9-Display ein freier vertikaler Balken —
+ * dort sitzt als Overlay der grosse Capture-Button, darueber App-Name + Projekt/Seiten-Info,
+ * darunter der Einstellungen-Button (oeffnet den Settings-Screen mit L/R-Tab-Struktur, die
+ * Live-View dieses Screens wird dabei ersetzt).
+ */
 @Composable
 fun PreviewScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
-    PlaceholderScaffold(
-        title = "Vorschau (PREVIEW)",
-        description = "Projekt \"${viewModel.projectName}\" — nächste Aufnahme: Seite " +
-            "%04d".format(viewModel.pageNumber) +
-            " (beide verbundenen Kameras L+R). Live-Bild: ${viewModel.activeCamera}."
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            UvcPreview(
-                camera = viewModel.activeCamera,
-                cameraBridge = cameraBridge,
-                viewModel = viewModel,
-                modifier = Modifier.fillMaxWidth().height(240.dp)
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        // Beide Live-Streams nebeneinander, je halbe Breite, 4:3 unverzerrt.
+        Row(modifier = Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+            CameraSelection.entries.forEach { camera ->
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    UvcPreview(
+                        camera = camera,
+                        cameraBridge = cameraBridge,
+                        viewModel = viewModel,
+                        rotated180 = viewModel.isRotated180(camera),
+                        modifier = Modifier.fillMaxWidth().aspectRatio(4f / 3f)
+                    )
+                }
+            }
+        }
+
+        // Overlay-Spalte im mittleren freien Balken.
+        Column(
+            modifier = Modifier.align(Alignment.Center).padding(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                "VIF Bookscanner",
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium
+            )
+            Text(
+                "\"${viewModel.projectName}\" — Seite ${"%04d".format(viewModel.pageNumber)}",
+                color = Color.White,
+                style = MaterialTheme.typography.bodySmall
             )
             Button(
                 onClick = { viewModel.start_capture() },
                 enabled = !viewModel.captureInProgress
             ) {
-                Text(if (viewModel.captureInProgress) "Capture laeuft ..." else "Capture")
-            }
-            Button(onClick = { viewModel.swap_cameras() }) {
-                Text("Swap Cameras (aktuell: ${viewModel.activeCamera})")
-            }
-            Button(onClick = { viewModel.set_orientation() }) {
-                Text("Rotate 180° (aktuell: ${viewModel.orientation})")
+                Text(if (viewModel.captureInProgress) "..." else "Capture")
             }
             Button(onClick = { viewModel.start_setup() }) {
-                Text("Recalibrate / Setup")
+                Text("Einstellungen")
             }
         }
     }
@@ -78,9 +109,18 @@ fun PreviewScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
  * (parallele) Doppelseiten-Aufnahme laeuft. Sobald beide Kameras fertig sind, wechselt die
  * State-Machine automatisch zu RECHECK — dort steht das explizite "Fertig, jetzt
  * umblaettern"-Signal (siehe [RecheckScreen]).
+ *
+ * KRITISCH (Root-Cause-Fix, live gefunden 2026-07-21): dieser Screen MUSS die UvcPreview-
+ * Views BEIDER Kameras eingebettet behalten. Ohne sie disposed Compose beim State-Wechsel
+ * PREVIEW -> CAPTURE die AndroidView des PreviewScreens -> deren TextureView-Surface wird
+ * mitten im laufenden Capture zerstoert ("onSurfaceDestroy" exakt zwischen handleResize und
+ * handleCaptureStill im Log) -> der native UVC-Stream bricht ab -> weder der Raw-Frame-
+ * Callback noch der TextureView-Fallback bekommen je einen Frame (leere 0-KB-Datei trotz
+ * korrekt durchlaufender State-Machine). Die Mini-Live-Feeds unten halten die Surfaces am
+ * Leben UND zeigen dem Nutzer live, was gerade aufgenommen wird.
  */
 @Composable
-fun CaptureScreen(viewModel: ScannerViewModel) {
+fun CaptureScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -114,6 +154,19 @@ fun CaptureScreen(viewModel: ScannerViewModel) {
                 color = if (finished) MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.onSurface
             )
+        }
+
+        // Surfaces beider Kameras am Leben halten (siehe Funktions-Kommentar) + Live-Blick
+        // auf das, was gerade aufgenommen wird.
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            CameraSelection.entries.forEach { camera ->
+                UvcPreview(
+                    camera = camera,
+                    cameraBridge = cameraBridge,
+                    viewModel = viewModel,
+                    modifier = Modifier.weight(1f).height(160.dp)
+                )
+            }
         }
     }
 }

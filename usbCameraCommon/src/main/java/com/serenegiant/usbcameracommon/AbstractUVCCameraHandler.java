@@ -201,6 +201,22 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 	}
 
 	/**
+	 * Wie {@link #resize(int, int)}, aber mit temporaerem USB-Bandbreiten-Faktor fuer die
+	 * neue Aufloesung. ERGAENZUNG (vif-bookscanner, 2026-07-21, Root-Cause-Fix): mit dem
+	 * Standard-Faktor 0.5 (Dual-Kamera-Preview-Betrieb) kommen 4656x3496-MJPEG-Frames nur
+	 * UNVOLLSTAENDIG an — libuvc verwirft jeden Frame mit "Application transferred too few
+	 * scanlines" (live im Log), weshalb NIE ein Voll-Aufloesungs-Frame einen Callback oder
+	 * die Surface erreichte. Fuer den kurzen Capture-Moduswechsel wird deshalb die VOLLE
+	 * Bandbreite (1.0) angefordert; das Rueck-resize auf Preview-Groesse stellt den
+	 * Original-Faktor wieder her. Konsequenz: Voll-Aufloesungs-Captures beider Kameras
+	 * muessen SEQUENZIELL laufen (2x 1.0 gleichzeitig geht nicht).
+	 */
+	public void resize(final int width, final int height, final float bandwidthFactor) {
+		checkReleased();
+		sendMessage(obtainMessage(MSG_RESIZE, width, height, Float.valueOf(bandwidthFactor)));
+	}
+
+	/**
 	 * Bindet die laufende Preview an eine NEUE Surface um, ohne Groesse zu aendern.
 	 * ERGAENZUNG (vif-bookscanner, 2026-07-21): {@link #startPreview(Object)} ist beim
 	 * CameraThread hart gegen Mehrfachaufruf gesperrt ({@code if (mIsPreviewing) return;} in
@@ -483,7 +499,7 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 			thread.handleUpdateMedia((String)msg.obj);
 			break;
 		case MSG_RESIZE:
-			thread.handleResize(msg.arg1, msg.arg2);
+			thread.handleResize(msg.arg1, msg.arg2, (msg.obj instanceof Float) ? (Float)msg.obj : null);
 			break;
 		case MSG_REBIND_SURFACE:
 			thread.handleRebindSurface(msg.obj);
@@ -702,12 +718,18 @@ public abstract class AbstractUVCCameraHandler extends Handler {
 		 * Groesse von der Kamera nicht unterstuetzt, bleibt die alte Preview-Groesse aktiv
 		 * (kein Absturz) — genau wie der bestehende Fallback in handleStartPreview.
 		 */
-		public void handleResize(final int width, final int height) {
-			if (DEBUG) Log.v(TAG_THREAD, "handleResize:width=" + width + ",height=" + height);
+		public void handleResize(final int width, final int height, final Float newBandwidthFactor) {
+			if (DEBUG) Log.v(TAG_THREAD, "handleResize:width=" + width + ",height=" + height
+				+ (newBandwidthFactor != null ? ",bandwidth=" + newBandwidthFactor : ""));
 			if (mUVCCamera == null) return;
 			if (mPreviewSurface == null) {
 				Log.w(TAG_THREAD, "handleResize: keine gespeicherte Preview-Surface vorhanden, breche ab");
 				return;
+			}
+			// Temporaerer Bandbreiten-Wechsel fuer Voll-Aufloesungs-Captures, siehe
+			// AbstractUVCCameraHandler#resize(int,int,float) — Root-Cause-Fix "too few scanlines".
+			if (newBandwidthFactor != null) {
+				mBandwidthFactor = newBandwidthFactor.floatValue();
 			}
 			final int oldWidth = mWidth;
 			final int oldHeight = mHeight;

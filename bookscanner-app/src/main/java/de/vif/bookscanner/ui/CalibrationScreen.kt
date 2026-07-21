@@ -76,7 +76,7 @@ fun CalibrationScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge
                 }
 
                 Button(onClick = { viewModel.start_setup() }) {
-                    Text("Weiter zu LOCK")
+                    Text("Weiter zu Einstellungen")
                 }
             }
 
@@ -84,6 +84,7 @@ fun CalibrationScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge
                 camera = viewModel.activeCamera,
                 cameraBridge = cameraBridge,
                 viewModel = viewModel,
+                rotated180 = viewModel.isRotated180(viewModel.activeCamera),
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()

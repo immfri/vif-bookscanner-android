@@ -19,7 +19,10 @@ fun BookscannerApp(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
             ScannerState.CALIBRATION -> CalibrationScreen(viewModel, cameraBridge)
             ScannerState.LOCK -> LockScreen(viewModel)
             ScannerState.PREVIEW -> PreviewScreen(viewModel, cameraBridge)
-            ScannerState.CAPTURE -> CaptureScreen(viewModel)
+            // cameraBridge auch hier: CaptureScreen MUSS die UvcPreviews beider Kameras
+            // eingebettet behalten, sonst stirbt die TextureView-Surface mitten im Capture
+            // (Root-Cause-Fix 2026-07-21, siehe CaptureScreen-Kommentar).
+            ScannerState.CAPTURE -> CaptureScreen(viewModel, cameraBridge)
             ScannerState.RECHECK -> RecheckScreen(viewModel)
             ScannerState.SETUP -> SettingsScreen(viewModel, cameraBridge)
         }

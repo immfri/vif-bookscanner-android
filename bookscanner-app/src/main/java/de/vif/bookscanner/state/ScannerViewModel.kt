@@ -41,6 +41,13 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     var orientation by mutableStateOf(PageOrientation.NORMAL)
         private set
 
+    /** 180-Grad-Rotation je Kamera (User-Vorgabe 2026-07-21): Kameras sind physisch nicht
+     * per ID unterscheidbar und koennen kopfueber montiert sein. Wird auf Live-Vorschau
+     * (View.rotation) und gespeicherte JPEGs (verlustfreies EXIF-Flag) angewandt;
+     * persistiert in UvcControlPrefs, hier nur der Compose-State-Spiegel. */
+    var rotation180ByCamera by mutableStateOf<Map<CameraSelection, Boolean>>(emptyMap())
+        private set
+
     var projectName by mutableStateOf("buch")
         private set
 
@@ -119,8 +126,18 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             } else {
                 bridge.loadControlSet(activeCamera)
             }
+            rotation180ByCamera = CameraSelection.entries.associateWith { bridge.getRotation180(it) }
         }
     }
+
+    /** Schaltet die 180-Grad-Rotation fuer [camera] um (Live-Anzeige + EXIF der Dateien). */
+    fun toggle_rotation180(camera: CameraSelection) {
+        val bridge = cameraBridge ?: return
+        bridge.setRotation180(camera, !bridge.getRotation180(camera))
+        rotation180ByCamera = CameraSelection.entries.associateWith { bridge.getRotation180(it) }
+    }
+
+    fun isRotated180(camera: CameraSelection): Boolean = rotation180ByCamera[camera] == true
 
     fun set_calibration_mode(mode: CalibrationMode) {
         calibrationMode = mode
@@ -250,6 +267,8 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         val connectedCameras = CameraSelection.entries.filter { bridge.isOpened(it) }
+        Log.i(TAG, "start_capture: Kamera-Status " +
+            CameraSelection.entries.joinToString { "$it=${if (bridge.isOpened(it)) "OFFEN" else "ZU"}" })
         if (connectedCameras.isEmpty()) {
             Log.w(TAG, "start_capture: keine Kamera verbunden — Capture uebersprungen")
             return
@@ -262,7 +281,23 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         captureCompletedCount = 0
         captureFinishedCameras = emptySet()
 
-        connectedCameras.forEach { camera ->
+        // KORREKTUR 2026-07-21 (Root-Cause "too few scanlines"): SEQUENZIELL statt parallel.
+        // Der Voll-Aufloesungs-Capture braucht die VOLLE USB-Bandbreite (Faktor 1.0, siehe
+        // captureFullResolutionThenReturnToPreview) — zwei gleichzeitige 4656x3496-Streams
+        // mit je 0.5 lieferten nachweislich nur unvollstaendige Frames (libuvc verwarf alle).
+        // Zwei parallele Captures mit je 1.0 sind physikalisch unmoeglich (gemeinsamer
+        // USB2-Baum). Die Wartezeit-Ueberlappung entfaellt damit bewusst zugunsten
+        // funktionierender Aufnahmen.
+        fun captureAt(index: Int) {
+            if (index >= connectedCameras.size) {
+                captureInProgress = false
+                lastCapturedFiles = capturedThisRound.sortedBy { it.name }
+                lastCapturedFile = lastCapturedFiles.lastOrNull()
+                pageNumber += 1
+                state = ScannerState.RECHECK
+                return
+            }
+            val camera = connectedCameras[index]
             val fileName = BookscanFileNamer.buildFileName(
                 projectName = projectName,
                 pageNumber = pageNumber,
@@ -274,17 +309,10 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 capturedThisRound.add(targetFile)
                 captureCompletedCount += 1
                 captureFinishedCameras = captureFinishedCameras + camera
-                if (captureCompletedCount >= captureTotalCount) {
-                    captureInProgress = false
-                    // Stabile L-vor-R-Reihenfolge fuer die Anzeige, unabhaengig davon,
-                    // welche Kamera zuerst fertig wurde.
-                    lastCapturedFiles = capturedThisRound.sortedBy { it.name }
-                    lastCapturedFile = lastCapturedFiles.lastOrNull()
-                    pageNumber += 1
-                    state = ScannerState.RECHECK
-                }
+                captureAt(index + 1)
             }
         }
+        captureAt(0)
     }
 
     /** Nutzer bestaetigt die aufgenommene Seite in RECHECK -> zurueck PREVIEW fuer naechste Seite. */

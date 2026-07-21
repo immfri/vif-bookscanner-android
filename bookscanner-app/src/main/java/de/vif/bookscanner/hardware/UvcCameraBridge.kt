@@ -263,8 +263,11 @@ class UvcCameraBridge(
         // Commit-Message). Das ist eine physische USB2-Bandbreiten-/Hub-Grenze dieses
         // konkreten Aufbaus, kein Software-Bug — volle Sensor-Aufloesung braucht entweder
         // einen anderen Hub/Kabel/eine Einzelkamera-Sequenzierung oder bleibt Zukunftsarbeit.
-        // TODO: Zwischengroessen (z.B. 800x600, 1024x768) sind NICHT getestet — koennten
-        // noch funktionieren und mehr Qualitaet als 640x480 liefern.
+        // Zwischengroessen zwischen 640x480 und 1280x720 gibt es bei dieser Kamera laut
+        // Descriptor NICHT (volle gemeldete Liste: 4656x3496, 4160x3120, 3264x2448, 2592x1944,
+        // 1920x1080, 1600x1200, 1280x720, 640x480 — der naechste Schritt nach 640x480 ist
+        // direkt 1280x720, kein 800x600/1024x768 verfuegbar). 640x480 ist damit die
+        // hoechste aktuell nutzbare Groesse auf diesem Geraet.
         sizes.minByOrNull { kotlin.math.abs(it.width.toLong() * it.height - 640L * 480L) }?.let { capture ->
             when (camera) {
                 CameraSelection.LEFT -> resolvedCaptureSizeL = capture.width to capture.height

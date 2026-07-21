@@ -290,21 +290,24 @@ class UvcCameraBridge(
         } ?: return
 
         val existing = handlerFor(camera)
-        if (existing != null) return
-
-        val bandwidthFactor = 0.5f // zwei Kameras teilen sich die USB2-Bandbreite (wie usbCameraTest7).
-        val newHandler = UVCCameraHandler.createHandler(
-            activity, view, previewWidth, previewHeight, bandwidthFactor
-        )
-        when (camera) {
-            CameraSelection.LEFT -> handlerL = newHandler
-            CameraSelection.RIGHT -> handlerR = newHandler
+        if (existing == null) {
+            val bandwidthFactor = 0.5f // zwei Kameras teilen sich die USB2-Bandbreite (wie usbCameraTest7).
+            val newHandler = UVCCameraHandler.createHandler(
+                activity, view, previewWidth, previewHeight, bandwidthFactor
+            )
+            when (camera) {
+                CameraSelection.LEFT -> handlerL = newHandler
+                CameraSelection.RIGHT -> handlerR = newHandler
+            }
         }
 
-        // WICHTIG: view.surfaceTexture ist direkt nach View-Erzeugung meist noch null (die
-        // TextureView-Surface wird erst asynchron nach dem Attach/Layout verfuegbar). Ohne
-        // diesen Callback bricht startPreview() beim ersten Versuch (Kamera-open-Zeitpunkt)
-        // still ab und wird nie erneut aufgerufen -> Preview bleibt dauerhaft ein grauer Block.
+        // WICHTIG (live gefunden, 2026-07-21): Bei Screen-Wechsel (z.B. CalibrationScreen ->
+        // SettingsScreen) entsteht eine NEUE UvcPreview-TextureView fuer dieselbe Kamera, die
+        // alte wird disposed. Ohne den Callback bei JEDEM bindCameraView-Aufruf neu zu
+        // registrieren (nicht nur beim allerersten Handler-Create) blieb die Preview nach so
+        // einem Wechsel dauerhaft grau — der Handler war bereits offen, aber niemand hoerte
+        // mehr auf onSurfaceCreated der neuen View, also wurde startPreview() nie erneut mit
+        // der neuen Surface aufgerufen.
         view.setCallback(object : CameraViewInterface.Callback {
             override fun onSurfaceCreated(v: CameraViewInterface, surface: Surface) {
                 Log.d(TAG, "onSurfaceCreated fuer $camera — starte Preview falls Kamera offen")
@@ -323,6 +326,14 @@ class UvcCameraBridge(
                 Log.d(TAG, "onSurfaceDestroy fuer $camera")
             }
         })
+
+        // Falls die View (z.B. TextureView) schon vor diesem Aufruf eine gueltige Surface
+        // hatte (etwa weil sie vom Compose-Recycling wiederverwendet wurde), kommt
+        // onSurfaceCreated fuer diese Surface u.U. nie erneut — direkt pruefen und ggf. sofort
+        // starten, statt nur auf den Callback zu warten.
+        if (view.hasSurface() && handlerFor(camera)?.isOpened == true) {
+            startPreview(camera)
+        }
     }
 
     private fun openPendingConnectionIfAny(camera: CameraSelection) {

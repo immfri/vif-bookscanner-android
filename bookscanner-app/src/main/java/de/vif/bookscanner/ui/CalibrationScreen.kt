@@ -44,7 +44,10 @@ import de.vif.bookscanner.state.ScannerViewModel
 fun CalibrationScreen(viewModel: ScannerViewModel, cameraBridge: UvcCameraBridge) {
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("Kalibrierung", style = MaterialTheme.typography.headlineSmall)
-        Text("Kamera: ${viewModel.activeCamera}")
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Kamera: ${viewModel.activeCamera}")
+            OutlinedButton(onClick = { viewModel.swap_cameras() }) { Text("Switch") }
+        }
 
         Row(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
             Column(

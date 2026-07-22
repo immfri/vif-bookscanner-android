@@ -1152,6 +1152,33 @@ class UvcCameraBridge(
     /** Anzahl der aktuell per USB angeschlossenen Kamera-Geraete (Start-Gate-Kriterium). */
     fun getAttachedCameraCount(): Int = attachedDevices.size
 
+    // FIX (2026-07-22, live am Smartphone gefunden): Sind beim App-Start BEREITS beide
+    // Kameras angesteckt (Cold-Start), feuert onAttach() fuer beide fast gleichzeitig, und
+    // zwei simultane usbMonitor.requestPermission()-Aufrufe kollidieren auf Systemebene — die
+    // zweite UsbPermissionActivity wird sofort mit RESULT_CANCELED beendet statt angezeigt zu
+    // werden (im Logcat als "result code=3" statt der erwarteten Nutzer-Interaktion sichtbar),
+    // die zweite Kamera bleibt dadurch unverbunden, ohne jeden Fehler-Log. Live reproduziert:
+    // ein App-Neustart (LEFT dann schon berechtigt, nur noch RIGHT fragt) behob es zufaellig,
+    // weil dann nur noch EINE Anfrage in Flight war. Fix: Anfragen strikt sequenziell stellen —
+    // die naechste erst, nachdem onConnect() (Erfolg) oder onCancel() (Ablehnung/Fehler) fuer
+    // die vorherige gefeuert hat. Beide sind die einzigen Stellen, an denen requestPermission()
+    // ueberhaupt aufgeloest wird (siehe USBMonitor.processConnect/processCancel), daher genuegt
+    // ein einfaches In-Flight-Flag ohne weitere Synchronisation.
+    private val pendingPermissionRequests = ArrayDeque<UsbDevice>()
+    private var permissionRequestInFlight = false
+
+    private fun requestPermissionQueued(device: UsbDevice) {
+        pendingPermissionRequests.add(device)
+        processNextPermissionRequest()
+    }
+
+    private fun processNextPermissionRequest() {
+        if (permissionRequestInFlight) return
+        val next = pendingPermissionRequests.removeFirstOrNull() ?: return
+        permissionRequestInFlight = true
+        usbMonitor?.requestPermission(next)
+    }
+
     private val deviceConnectListener = object : OnDeviceConnectListener {
         override fun onAttach(device: UsbDevice) {
             Log.v(TAG, "onAttach: $device")
@@ -1161,12 +1188,16 @@ class UvcCameraBridge(
             // jedem beliebigen dritten USB-Geraet unnoetig ein Dialog aufpoppen.
             val freeSlotAvailable = handlerL?.isOpened != true || handlerR?.isOpened != true
             if (freeSlotAvailable) {
-                usbMonitor?.requestPermission(device)
+                requestPermissionQueued(device)
             }
         }
 
         override fun onConnect(device: UsbDevice, ctrlBlock: UsbControlBlock, createNew: Boolean) {
             Log.d(TAG, "onConnect: $device createNew=$createNew")
+            // Permission-Queue-Fix (siehe Kommentar oben): diese Anfrage ist aufgeloest,
+            // naechste in der Warteschlange (falls vorhanden) jetzt stellen.
+            permissionRequestInFlight = false
+            processNextPermissionRequest()
             // Ein Slot gilt als "belegt", sobald er entweder schon offen ist, schon einen
             // nachzuholenden ControlBlock wartend haelt, ODER (FIX Bug 1) synchron als
             // "claimed" markiert wurde — Letzteres verhindert die Race Condition: handler.open()
@@ -1294,6 +1325,11 @@ class UvcCameraBridge(
 
         override fun onCancel(device: UsbDevice) {
             Log.v(TAG, "onCancel: $device")
+            // Permission-Queue-Fix (siehe Kommentar oben): abgelehnt/fehlgeschlagen zaehlt
+            // ebenfalls als aufgeloest — sonst blockiert eine verweigerte Anfrage die
+            // Warteschlange fuer die zweite Kamera dauerhaft.
+            permissionRequestInFlight = false
+            processNextPermissionRequest()
         }
     }
 }

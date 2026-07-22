@@ -35,6 +35,7 @@ See [NOTICE](NOTICE) for the full explanation of why this split exists and is le
 - Camera calibration: auto mode (let auto-focus/auto-white-balance settle, then lock) and manual mode (sliders for all UVC parameters, live preview)
 - Focus sweep calibration: systematic scan across the focus range, sharpness lookup curve (Laplacian variance) instead of relying purely on the camera's built-in auto logic
 - Per-capture sharpness verification (instead of a fixed recalibration interval): focus is re-asserted before every shot + sharpness compared against the reference value
+- Optional separate capture-only "look" profile (brightness/contrast/sharpness/gain/gamma/saturation/hue/white balance/zoom) distinct from the live-feed profile — off by default (capture uses the live profile unchanged); focus itself is never split, since it's resolution-independent
 - File naming: `{ProjectName}_S{Page:04d}_{L|R}.jpg`, timestamp in EXIF
 
 Full concept/development history (internal only, not part of this repo): `04-projects/vif-bookscanner/android/plan-2026-07-21-android-portierung.md` in the private KI-OS vault.
@@ -52,6 +53,8 @@ Full concept/development history (internal only, not part of this repo): `04-pro
 **State flow (Compose UI):** `MainActivity` → `ScannerViewModel` (state machine: CALIBRATION → LOCK → PREVIEW → CAPTURE → RECHECK → SETUP, see `state/ScannerState.kt`) → `CalibrationScreen` (per-camera calibration + manual controls) → `SettingsScreen` (project/page naming, rotation, L/R swap, sharpness tolerance) → main capture screen (`BookscannerApp.kt`, split live preview + Capture button). A start-gate (`DeviceGateScreen`) blocks the whole app below 2 attached USB cameras.
 
 **Storage.** Captured JPEGs are written directly (no re-encode) to app-private storage as `{ProjectName}_S{Page:04d}_{L|R}.jpg` via `ScanStorageRepository`, with the capture timestamp written into EXIF (not the filename) so filenames stay simply sortable.
+
+**Known limitation — no true per-camera-identity settings.** Settings are persisted per physical *slot* (LEFT/RIGHT), not per camera device identity (vendor/product ID + serial), even though the UVC layer could in principle support that. Verified live: both ArduCAM IMX298 units report the **identical** USB serial number (`UC724`) — there is no reliable way to tell the two physical cameras apart by device identity on this hardware, so slot-based persistence is the deliberate, correct choice here. A future webcam brand with distinct serials per unit would allow real per-device persistence, but that is not implemented.
 
 ## Build
 

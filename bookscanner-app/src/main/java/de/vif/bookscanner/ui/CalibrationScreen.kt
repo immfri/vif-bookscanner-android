@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -148,6 +149,34 @@ private fun ManualCalibrationSection(viewModel: ScannerViewModel) {
                 "vorher schon einmal automatisch kalibriert wurde.",
             style = MaterialTheme.typography.bodySmall
         )
+
+        // Generische UVC-Vollkompatibilitaet (2026-07-22): optionaler eigener Look-Parametersatz
+        // fuer die Voll-Aufloesungs-Aufnahme, getrennt vom Live-Feed-Satz oben. Fokus bleibt
+        // bewusst aussen vor (aufloesungsunabhaengig, siehe ScannerViewModel-Kommentar).
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Checkbox(
+                checked = viewModel.captureLookOverrideEnabled,
+                onCheckedChange = { viewModel.toggle_capture_look_override() }
+            )
+            Text("Eigene Capture-Einstellungen (abweichend vom Live-Feed)")
+        }
+        if (viewModel.captureLookOverrideEnabled) {
+            val captureControls = viewModel.currentCaptureControls
+            Text(
+                "Gilt NUR fuer die Voll-Aufloesungs-Aufnahme, wird beim naechsten Capture " +
+                    "angewandt (kein Live-Effekt hier, Kamera steht gerade auf Preview).",
+                style = MaterialTheme.typography.bodySmall
+            )
+            ControlSlider("Helligkeit (Capture)", captureControls.brightness) { viewModel.update_capture_look_control(captureControls.copy(brightness = it)) }
+            ControlSlider("Kontrast (Capture)", captureControls.contrast) { viewModel.update_capture_look_control(captureControls.copy(contrast = it)) }
+            ControlSlider("Schärfe (Capture)", captureControls.sharpness) { viewModel.update_capture_look_control(captureControls.copy(sharpness = it)) }
+            ControlSlider("Gain (Capture)", captureControls.gain) { viewModel.update_capture_look_control(captureControls.copy(gain = it)) }
+            ControlSlider("Gamma (Capture)", captureControls.gamma) { viewModel.update_capture_look_control(captureControls.copy(gamma = it)) }
+            ControlSlider("Sättigung (Capture)", captureControls.saturation) { viewModel.update_capture_look_control(captureControls.copy(saturation = it)) }
+            ControlSlider("Hue (Capture)", captureControls.hue) { viewModel.update_capture_look_control(captureControls.copy(hue = it)) }
+            ControlSlider("Weißabgleich (Capture)", captureControls.whiteBalance) { viewModel.update_capture_look_control(captureControls.copy(whiteBalance = it, whiteBalanceAuto = false)) }
+            ControlSlider("Zoom (Capture)", captureControls.zoom) { viewModel.update_capture_look_control(captureControls.copy(zoom = it)) }
+        }
     }
 }
 

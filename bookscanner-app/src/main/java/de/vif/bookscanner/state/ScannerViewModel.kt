@@ -103,6 +103,17 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     var calibrationInProgress by mutableStateOf(false)
         private set
 
+    /** Generische UVC-Vollkompatibilitaet (2026-07-22): optionaler eigener Look-Parametersatz
+     * (Helligkeit/Kontrast/Schaerfe/Gain/Gamma/Saettigung/Hue/Weissabgleich/Zoom — NICHT Fokus,
+     * siehe [UvcCameraBridge.loadCaptureLook]-Kommentar) fuer die Voll-Aufloesungs-Aufnahme,
+     * getrennt vom Live-Feed-Parametersatz ([currentControls]). false = Capture nutzt denselben
+     * Satz wie Live (Normalfall). */
+    var captureLookOverrideEnabled by mutableStateOf(false)
+        private set
+
+    var currentCaptureControls by mutableStateOf(UvcControlSet())
+        private set
+
     // --- Automatisierter Test-Capture-Loop (Debug-Modus, siehe Plan Punkt 5) ---
 
     var testLoopRunning by mutableStateOf(false)
@@ -135,7 +146,37 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 bridge.loadControlSet(activeCamera)
             }
             rotation180ByCamera = CameraSelection.entries.associateWith { bridge.getRotation180(it) }
+            captureLookOverrideEnabled = bridge.hasCaptureLookOverride(activeCamera)
+            currentCaptureControls = bridge.loadCaptureLook(activeCamera)
         }
+    }
+
+    /** Schaltet den eigenen Capture-Look-Parametersatz fuer die aktive Kamera an/aus (siehe
+     * [captureLookOverrideEnabled]-Kommentar). Beim erstmaligen Einschalten wird der aktuelle
+     * Live-Satz als Startpunkt uebernommen (Fokus bleibt so automatisch konsistent, da beide
+     * Saetze denselben kalibrierten Fokuswert tragen). Beim Ausschalten wird der gespeicherte
+     * Override geloescht (Capture faellt zurueck auf "wie Live"). */
+    fun toggle_capture_look_override() {
+        val bridge = cameraBridge ?: return
+        if (captureLookOverrideEnabled) {
+            bridge.clearCaptureLookOverride(activeCamera)
+            captureLookOverrideEnabled = false
+            currentCaptureControls = bridge.loadCaptureLook(activeCamera)
+        } else {
+            val startingPoint = currentControls
+            bridge.saveCaptureLook(activeCamera, startingPoint)
+            captureLookOverrideEnabled = true
+            currentCaptureControls = startingPoint
+        }
+    }
+
+    /** Slider-Aenderung im Capture-Look-Parametersatz — nur persistiert (wird erst beim
+     * naechsten Voll-Aufloesungs-Capture angewandt, siehe [UvcCameraBridge]
+     * captureFullResolutionThenReturnToPreview), kein Live-Schreiben auf den Treiber wie bei
+     * [update_manual_control], da die Kamera gerade auf Preview-Aufloesung steht. */
+    fun update_capture_look_control(updated: UvcControlSet) {
+        currentCaptureControls = updated
+        cameraBridge?.saveCaptureLook(activeCamera, updated)
     }
 
     /** Schaltet die 180-Grad-Rotation fuer [camera] um (Live-Anzeige + EXIF der Dateien). */

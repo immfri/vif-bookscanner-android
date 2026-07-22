@@ -30,6 +30,32 @@ class UvcControlPrefs(context: Context) {
 
     private fun key(camera: CameraSelection) = "controls_$camera"
 
+    /** GENERISCHE UVC-VOLLKOMPATIBILITAET (2026-07-22, Anforderungserweiterung 2026-07-21
+     * "Getrennte Einstellungssaetze: Live-Feed-Settings und Capture-Settings sind
+     * unterschiedliche Konfigurationen"): optionaler zweiter Parametersatz NUR fuer die
+     * "Look"-Werte (Helligkeit/Kontrast/Schaerfe/Gain/Gamma/Saettigung/Hue/Weissabgleich/Zoom),
+     * der waehrend der Voll-Aufloesungs-Aufnahme statt des Live-Feed-Satzes angewandt wird.
+     * Fokus bleibt bewusst AUSSERHALB dieser Trennung: der Fokusmotor kennt keine Aufloesung,
+     * derselbe kalibrierte Wert gilt fuer Preview UND Capture (siehe [UvcControlSet]-Kommentar
+     * zu referenceSharpness/referenceSharpnessPreview — genau diese Unterscheidung existiert
+     * dort schon fuer den Schaerfe-VERGLEICHSWERT, nicht aber fuer die einstellbaren Look-
+     * Parameter selbst). Kein Override gespeichert (Normalfall) = Capture nutzt denselben Satz
+     * wie Live, unveraendertes Verhalten. */
+    fun hasCaptureOverride(camera: CameraSelection): Boolean = prefs.contains(captureKey(camera))
+
+    fun loadCapture(camera: CameraSelection): UvcControlSet =
+        UvcControlSet.fromPrefsString(prefs.getString(captureKey(camera), null)) ?: load(camera)
+
+    fun saveCapture(camera: CameraSelection, controls: UvcControlSet) {
+        prefs.edit().putString(captureKey(camera), controls.toPrefsString()).apply()
+    }
+
+    fun clearCaptureOverride(camera: CameraSelection) {
+        prefs.edit().remove(captureKey(camera)).apply()
+    }
+
+    private fun captureKey(camera: CameraSelection) = "controls_capture_$camera"
+
     /** Toleranzband in Prozent fuer den Pro-Aufnahme-Schaerfe-Vergleich gegen den
      * Referenzwert aus der Kalibrierung (z.B. 30 = Schaerfe darf bis zu 30% unter die
      * Referenz fallen, bevor gewarnt/retried wird). */

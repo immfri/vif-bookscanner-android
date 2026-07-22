@@ -666,6 +666,14 @@ class UvcCameraBridge(
         val cycleStartMs = System.currentTimeMillis()
         reopenAtSize(camera, captureW, captureH) {
             Log.i(TAG, "capture($camera): Reopen-hoch fertig, +${System.currentTimeMillis() - cycleStartMs}ms")
+            // Generische UVC-Vollkompatibilitaet (siehe UvcControlPrefs-Kommentar): optionaler
+            // Capture-eigener Look-Parametersatz (Helligkeit/Kontrast/... — NICHT Fokus, der
+            // bleibt aufloesungsunabhaengig der kalibrierte Wert), NUR falls der User explizit
+            // einen gespeichert hat. Ohne Override unveraendertes Verhalten (reopenAtSize()
+            // laedt ohnehin denselben zuletzt am Treiber stehenden Zustand weiter).
+            if (controlPrefs.hasCaptureOverride(camera)) {
+                applyManualControls(camera, controlPrefs.loadCapture(camera))
+            }
             try {
                 handler.captureStill(targetFile.absolutePath)
             } catch (e: Exception) {
@@ -1093,6 +1101,21 @@ class UvcCameraBridge(
     /** Geladener/gespeicherter Parametersatz fuer [camera] (Defaults falls noch nie
      * kalibriert/gespeichert wurde). */
     fun loadControlSet(camera: CameraSelection): UvcControlSet = controlPrefs.load(camera)
+
+    /** Generische UVC-Vollkompatibilitaet — Capture-eigener Look-Parametersatz (siehe
+     * [UvcControlPrefs]-Kommentar). [hasCaptureLookOverride] false = Capture nutzt denselben
+     * Satz wie Live (Normalfall, unveraendertes Verhalten). */
+    fun hasCaptureLookOverride(camera: CameraSelection): Boolean = controlPrefs.hasCaptureOverride(camera)
+
+    fun loadCaptureLook(camera: CameraSelection): UvcControlSet = controlPrefs.loadCapture(camera)
+
+    fun saveCaptureLook(camera: CameraSelection, controls: UvcControlSet) {
+        controlPrefs.saveCapture(camera, controls)
+    }
+
+    fun clearCaptureLookOverride(camera: CameraSelection) {
+        controlPrefs.clearCaptureOverride(camera)
+    }
 
     /**
      * Pro-Aufnahme-Schaerfe-Check (ersetzt festes N-Aufnahmen-Rekalibrierungs-Intervall, siehe

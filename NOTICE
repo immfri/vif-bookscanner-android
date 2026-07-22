@@ -101,6 +101,20 @@ as required by Section 4(b)):
 - Extended UVC control APIs (exposed to the app layer): focus, white
   balance, brightness, contrast, sharpness, gain, gamma, saturation, hue,
   zoom — auto and manual, plus dynamic supported-resolution querying.
+- **ARM-NEON SIMD reactivated for libjpeg-turbo** (`jni/CMakeLists.txt`):
+  the CMake build previously used the portable `jsimd_none.c` fallback
+  for every ABI, based on the (correct-for-x86-only) assumption that the
+  SIMD assembly needs a separate assembler (yasm/nasm). The ARM `.S`
+  files (`simd/jsimd_arm64_neon.S`, `simd/jsimd_arm_neon.S`) are plain
+  GNU-assembler syntax and build directly via CMake's `enable_language(ASM)`
+  using Clang's integrated assembler — no extra toolchain needed. Now
+  wired in per-ABI (matching the original upstream `Android.mk`):
+  arm64-v8a/armeabi-v7a get the NEON decode path, x86_64 stays on
+  `jsimd_none.c` (emulator-only target, would need real NASM). This
+  accelerates every MJPEG frame decode from the camera (live preview and
+  full-resolution capture both decode via libjpeg-turbo before the
+  app-level JPEG re-encode). Measured live on real hardware (see README
+  "Core features"): ~10% faster full-resolution dual-camera capture.
 
 For file-specific changes and exact line numbers, see this repository's
 git history (github.com/immfri/vif-bookscanner-android) from the fork

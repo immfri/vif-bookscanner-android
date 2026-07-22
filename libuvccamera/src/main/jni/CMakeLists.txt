@@ -8,17 +8,22 @@
 #    libjpeg-turbo1500.so, libusb100.so, libuvc.so, libUVCCamera.so
 #  (siehe System.loadLibrary(...)-Aufrufe in UVCCamera.java)
 #
-#  Bewusste Vereinfachung (Phase 1: nur Bau-Faehigkeit, keine Treiber-
-#  Optimierung): die SIMD-Assembler-Pfade von libjpeg-turbo (ARM-NEON .S,
-#  x86 .asm) wurden NICHT auf CMake portiert, weil sie einen eigenen
-#  Assembler (yasm/nasm bzw. GNU-Assembler-Direktiven) voraussetzen, den
-#  ndk-build automatisch mitgebracht hat, CMake/Clang so aber nicht ohne
-#  weiteres Setup. Stattdessen wird ueberall jsimd_none.c verwendet
-#  (reines C, keine SIMD-Beschleunigung beim JPEG-Decoding). Funktional
-#  identisch, nur langsamer. Spaeter nachruestbar.
+#  SIMD-Reaktivierung (2026-07-22): die ARM-NEON-Pfade von libjpeg-turbo
+#  (simd/jsimd_arm64_neon.S, simd/jsimd_arm_neon.S) sind normale GNU-
+#  Assembler-Dateien (.S, C-Praeprozessor + GAS-Syntax) -- die braucht
+#  KEINEN separaten Assembler wie yasm/nasm, Clangs eingebauter Assembler
+#  baut sie ueber CMakes Standard-ASM-Sprachunterstuetzung direkt (siehe
+#  enable_language(ASM) unten). Nur die x86/x86_64-SIMD-Pfade brauchen
+#  echtes NASM (.asm-Dateien) -- das ist NICHT eingerichtet, x86_64
+#  bleibt bewusst auf jsimd_none.c (kein reales Zielgeraet, nur
+#  Emulator). Referenz fuer die korrekten Pro-ABI-Quelldateien: das
+#  Original-Android.mk dieses Moduls (jni/libjpeg-turbo-1.5.0/Android.mk,
+#  Zeilen ~120-143).
 #
 cmake_minimum_required(VERSION 3.22.1)
 project(uvccamera)
+
+enable_language(ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 14)
@@ -84,8 +89,23 @@ set(JPEG_SRC
 	${JPEG_DIR}/transupp.c
 	${JPEG_DIR}/jdatadst-tj.c
 	${JPEG_DIR}/jdatasrc-tj.c
-	${JPEG_DIR}/jsimd_none.c
 )
+
+# SIMD-Reaktivierung (2026-07-22): pro ABI die vom Original-Android.mk vorgegebenen
+# NEON-Quellen statt des portablen jsimd_none.c-Fallbacks -- ANDROID_ABI wird vom
+# NDK-Toolchain-File (android.toolchain.cmake) automatisch gesetzt, sobald AGPs
+# externalNativeBuild diese CMakeLists.txt pro ABI-Ziel konfiguriert (siehe
+# libuvccamera/build.gradle abiFilters). x86_64 hat KEINEN aktivierten SIMD-Pfad
+# (braucht echtes NASM fuer die .asm-Dateien, siehe Kommentar oben) und bleibt auf
+# jsimd_none.c -- korrekt und funktional identisch zum bisherigen Stand, nur ohne
+# Beschleunigung (kein reales Zielgeraet, nur x86_64-Emulator).
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+	list(APPEND JPEG_SRC ${JPEG_DIR}/simd/jsimd_arm64.c ${JPEG_DIR}/simd/jsimd_arm64_neon.S)
+elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+	list(APPEND JPEG_SRC ${JPEG_DIR}/simd/jsimd_arm.c ${JPEG_DIR}/simd/jsimd_arm_neon.S)
+else()
+	list(APPEND JPEG_SRC ${JPEG_DIR}/jsimd_none.c)
+endif()
 
 add_library(jpeg-turbo1500 SHARED ${JPEG_SRC})
 target_include_directories(jpeg-turbo1500 PUBLIC
@@ -102,6 +122,16 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 	target_compile_definitions(jpeg-turbo1500 PRIVATE SIZEOF_SIZE_T=8)
 else()
 	target_compile_definitions(jpeg-turbo1500 PRIVATE SIZEOF_SIZE_T=4)
+endif()
+# Original Android.mk: LOCAL_ARM_MODE := arm + LOCAL_ASMFLAGS += -DELF fuer die
+# NEON-.S-Dateien (arm64 hat keinen Thumb/ARM-Modus-Unterschied mehr, -DELF gilt
+# aber fuer beide, da die .S-Dateien ueber ELF-Sektions-Makros verzweigen).
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
+	set_source_files_properties(
+		${JPEG_DIR}/simd/jsimd_arm64_neon.S
+		${JPEG_DIR}/simd/jsimd_arm_neon.S
+		PROPERTIES COMPILE_FLAGS "-DELF"
+	)
 endif()
 
 # ---------------------------------------------------------------------------

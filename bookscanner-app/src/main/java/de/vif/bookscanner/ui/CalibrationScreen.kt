@@ -119,12 +119,6 @@ private fun AutoCalibrationSection(viewModel: ScannerViewModel) {
         if (sweepPoints > 0) {
             Text("Fokus-Sweep-Kurve: $sweepPoints Messpunkte", style = MaterialTheme.typography.bodySmall)
         }
-
-        // Debug-Diagnose (Plan Punkt 4): kein Teil des normalen Kalibrier-Flows, nur Logcat-
-        // Ausgabe fuer die empirische Ermittlung des minimal noetigen Moduswechsel-Settle-Werts.
-        OutlinedButton(onClick = { viewModel.run_settle_diagnosis() }) {
-            Text("Debug: Moduswechsel-Settle-Zeit messen (Logcat)")
-        }
     }
 }
 

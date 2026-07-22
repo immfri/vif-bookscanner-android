@@ -90,14 +90,6 @@ class UvcCameraBridge(
          * (siehe [resolveCameraSizes]), nicht geraten. */
         private const val PREVIEW_TARGET_AREA = 320L * 240L
 
-        // 2026-07-21 von 400 auf 2000 erhoeht: die Live-Messung (diagnoseModeSwitchSettleTime,
-        // beide Kameras, je 10 Frames) zeigte, dass nach dem resize() auf volle Sensor-
-        // Aufloesung (4656x3496 via USB2) der erste verwertbare Frame real ~1,9s braucht —
-        // 400ms war ein ungetesteter Platzhalter weit unterhalb der Realitaet und Mitursache
-        // der Capture-Timeouts. Spaeter ggf. weiter optimierbar, sobald der Raw-Frame-Pfad
-        // (siehe AbstractUVCCameraHandler#handleCaptureStill) am Geraet vermessen ist.
-        private const val CAPTURE_SETTLE_DELAY_MS = 2000L
-
         /** Wartezeit bis der Auto-Fokus/Auto-WB-Regelkreis eingeschwungen ist, bevor der
          * erreichte Wert ausgelesen und Auto abgeschaltet (fixiert) wird. Ungetestet mit
          * echter Kamera, konservativ gewaehlt. */
@@ -117,28 +109,6 @@ class UvcCameraBridge(
          * bekannten Peak bei Toleranzband-Unterschreitung (siehe [correctFocusUsingCurve]) —
          * kein voller Re-Sweep, nur Nachbarschaftssuche in der gespeicherten Kurve. */
         private const val FOCUS_LOCAL_SEARCH_WINDOW_PERCENT = 15
-
-        /** Frame-Settle-Diagnose (Punkt 4): Wartezeit VOR dem allerersten Diagnose-Frame nach
-         * dem resize()-Aufruf, damit der Handler den Moduswechsel ueberhaupt entgegennehmen
-         * kann. Danach werden die Frames OHNE weitere Wartezeit angefordert (das ist ja gerade
-         * die Messgroesse). */
-        /** Minimale technische Wartezeit zwischen zwei Diagnose-Frame-Anforderungen, NUR damit
-         * die native Schreib-Pipeline die Datei lesbar fertigstellt — keine Settle-Annahme
-         * ueber Bildqualitaet (das ist ja genau der Messwert, den [diagnoseModeSwitchSettleTime]
-         * ermitteln soll). Absichtlich sehr kurz gehalten. */
-        private const val FRAME_READ_POLL_DELAY_MS = 30L
-
-        /** Sicherheits-Obergrenze fuer [diagnoseModeSwitchSettleTime]s Datei-Ready-Polling
-         * (siehe dortiger Kommentar) — verhindert endloses Warten, falls captureStill() fuer
-         * einen Frame nie eine lesbare Datei liefert (z.B. Timeout im nativen Layer).
-         * KORREKTUR 2026-07-21 (0-Byte-Capture-Untersuchung): vorheriger Wert 60 (=1,8s bei
-         * 30ms Poll-Delay) war KUERZER als handleCaptureStill()s eigene interne Timeouts
-         * (RAW_CAPTURE_TIMEOUT_MS 5s + ggf. TextureView-Fallback nochmal bis 5s) — die
-         * Diagnose brach also IMMER vorzeitig ab, bevor der native Layer ueberhaupt fertig
-         * war, und meldete faelschlich "kein lesbares Bild" fuer JEDEN Frame. Auf 500 (=15s)
-         * angehoben, damit tatsaechlich gemessen wird ob/wann ein Frame ankommt, statt das
-         * Messfenster kleiner als die zu messende Groesse zu waehlen. */
-        private const val FRAME_READ_POLL_MAX_ATTEMPTS = 500
 
         /** USB-Bandbreiten-Faktor je Kamera, fest fuer die gesamte Handler-Lebensdauer (Preview
          * UND Voll-Aufloesungs-Capture) — reopenAtSize() aendert ihn nie (nur setPreviewSize(),
@@ -734,84 +704,6 @@ class UvcCameraBridge(
         } catch (e: Exception) {
             Log.w(TAG, "applyExifMetadata($camera): EXIF-Metadaten setzen fehlgeschlagen", e)
         }
-    }
-
-    /**
-     * Diagnose-Modus (Punkt 4): schaltet auf Capture-Aufloesung und nimmt danach [frameCount]
-     * Frames HINTEREINANDER auf, OHNE Wartezeit dazwischen (die feste [CAPTURE_SETTLE_DELAY_MS]
-     * wird hier bewusst NICHT verwendet — genau die ist ja die zu ueberpruefende Annahme). Fuer
-     * jeden Frame wird Schaerfe + Zeitstempel seit dem resize()-Aufruf geloggt
-     * ("Frame N: Schaerfe=X, +Yms seit Moduswechsel"). Ziel: den echten minimalen Settle-Wert
-     * empirisch ermitteln statt zu raten (siehe [CAPTURE_SETTLE_DELAY_MS]-Kommentar — 400ms ist
-     * ein ungetesteter Platzhalter). Schaltet am Ende zurueck auf Preview-Aufloesung.
-     *
-     * Reiner Debug-/Messwerkzeug-Code — der User wertet das Logcat-Ergebnis beim naechsten
-     * Live-Test aus, diese Funktion liefert selbst keine Entscheidung/Anpassung von
-     * [CAPTURE_SETTLE_DELAY_MS] (das waere Raten ohne echte Geraetedaten).
-     */
-    fun diagnoseModeSwitchSettleTime(camera: CameraSelection, frameCount: Int = 10) {
-        val handler = handlerFor(camera)
-        if (handler == null || !handler.isOpened) {
-            Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): Kamera nicht geoeffnet, Diagnose abgebrochen")
-            return
-        }
-        val (captureW, captureH) = captureSizeFor(camera)
-        Log.i(TAG, "diagnoseModeSwitchSettleTime($camera): starte Moduswechsel auf ${captureW}x$captureH, $frameCount Frames ohne Wartezeit")
-        val switchStartMs = System.currentTimeMillis()
-        try {
-            handler.resize(captureW, captureH)
-        } catch (e: Exception) {
-            Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): resize fehlgeschlagen, Diagnose abgebrochen", e)
-            return
-        }
-
-        fun captureFrame(index: Int) {
-            if (index >= frameCount) {
-                val (previewW, previewH) = previewSizeFor(camera)
-                try {
-                    handler.resize(previewW, previewH)
-                } catch (e: Exception) {
-                    Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): resize zurueck auf Preview fehlgeschlagen", e)
-                }
-                Log.i(TAG, "diagnoseModeSwitchSettleTime($camera): fertig, zurueck auf Preview-Aufloesung")
-                return
-            }
-            val frameFile = File(activity.cacheDir, "settle_diag_${camera}_${index}.jpg")
-            val requestSentMs = System.currentTimeMillis()
-            try {
-                handler.captureStill(frameFile.absolutePath)
-            } catch (e: Exception) {
-                Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): captureStill Frame $index fehlgeschlagen", e)
-            }
-            // KORREKTUR (live gefunden, 2026-07-21): ein fixes Delay vor dem Lesen war zu kurz —
-            // handleCaptureStill() schreibt SYNCHRON auf dem CameraThread (bitmap.compress() bei
-            // voller Sensor-Aufloesung dauert je nach Geraet deutlich laenger als angenommene
-            // 30ms), der erste Live-Messlauf lieferte deshalb bei ALLEN 10 Frames "kein lesbares
-            // Bild" statt echter Schaerfewerte. Fix: statt zu raten, auf tatsaechliche
-            // Datei-Fertigstellung pollen (Existenz + ueber zwei Polls stabile Groesse), mit
-            // Sicherheits-Timeout. Die dafuer benoetigte Zeit IST zugleich die eigentlich
-            // gesuchte Messgroesse (wie lange braucht ein Frame nach dem Moduswechsel wirklich).
-            fun pollUntilFileReady(lastSize: Long, pollCount: Int) {
-                val currentSize = if (frameFile.exists()) frameFile.length() else -1L
-                val stable = currentSize > 0 && currentSize == lastSize
-                if (stable || pollCount >= FRAME_READ_POLL_MAX_ATTEMPTS) {
-                    val elapsedMs = System.currentTimeMillis() - switchStartMs
-                    val waitedForFileMs = System.currentTimeMillis() - requestSentMs
-                    val sharpness = measureSharpness(frameFile, camera)
-                    frameFile.delete()
-                    if (sharpness != null) {
-                        Log.i(TAG, "diagnoseModeSwitchSettleTime($camera): Frame $index: Schaerfe=$sharpness, +${elapsedMs}ms seit Moduswechsel (Datei-Schreibzeit ${waitedForFileMs}ms, $pollCount Polls)")
-                    } else {
-                        Log.w(TAG, "diagnoseModeSwitchSettleTime($camera): Frame $index: kein lesbares Bild, +${elapsedMs}ms seit Moduswechsel (Datei-Schreibzeit ${waitedForFileMs}ms, $pollCount Polls, stable=$stable)")
-                    }
-                    captureFrame(index + 1)
-                } else {
-                    mainHandler.postDelayed({ pollUntilFileReady(currentSize, pollCount + 1) }, FRAME_READ_POLL_DELAY_MS)
-                }
-            }
-            mainHandler.postDelayed({ pollUntilFileReady(-1L, 0) }, FRAME_READ_POLL_DELAY_MS)
-        }
-        captureFrame(0)
     }
 
     /**

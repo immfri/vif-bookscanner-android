@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App-Icon-Hintergrund, passend zum Logo (VIF-BookScanner_Startup.png: weisses
+         Buch+Schaltkreis-Symbol auf Schwarz). -->
+    <color name="ic_launcher_background">#000000</color>
+</resources>

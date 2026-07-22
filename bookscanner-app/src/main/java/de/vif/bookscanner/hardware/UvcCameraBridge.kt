@@ -1378,6 +1378,19 @@ class UvcCameraBridge(
             // Warteschlange fuer die zweite Kamera dauerhaft.
             permissionRequestInFlight = false
             processNextPermissionRequest()
+            // ROOT CAUSE FIX 2026-07-22 (Live gefunden: Android-Kamera-Laufzeitberechtigung
+            // ueberlagert beim allerersten Start den USB-Permission-Dialog -> beide USB-
+            // Anfragen werden vom System sofort mit onCancel abgewiesen, Sekundenbruchteile
+            // nach onAttach, OHNE jede Nutzerinteraktion). Ohne dieses Reset blieb das Geraet
+            // wegen handledDeviceNames (siehe dortiger Kommentar) fuer den Rest des Prozesses
+            // permanent unverbunden — der naechste Wiederholungs-Fire der Bibliothek
+            // (mDeviceCheckRunnable, alle ~2s) wurde als Duplikat ignoriert statt als faelliger
+            // Retry erkannt. handledDeviceNames hier zuruecksetzen macht eine abgewiesene
+            // Anfrage automatisch erneut versuchbar, sobald die Bibliothek als naechstes
+            // onAttach() fuer dieses (weiterhin physisch angeschlossene) Geraet feuert — ohne
+            // die urspruengliche Kollisions-Sperre (siehe oben) zu schwaechen, da
+            // requestPermissionQueued() weiterhin strikt sequenziell bleibt.
+            handledDeviceNames.remove(device.deviceName)
         }
     }
 }

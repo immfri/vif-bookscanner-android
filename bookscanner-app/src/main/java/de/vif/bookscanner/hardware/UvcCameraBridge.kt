@@ -388,6 +388,18 @@ class UvcCameraBridge(
 
             override fun onSurfaceDestroy(v: CameraViewInterface, surface: Surface) {
                 Log.d(TAG, "onSurfaceDestroy fuer $camera")
+                // BUGFIX 2026-07-22 (live gefunden: Kamera-Switch LEFT->RIGHT liess die native
+                // LEFT-Preview-Pipeline unbegrenzt weiterlaufen, sichtbar als dauerhafter
+                // Logcat-Spam "BufferQueue has been abandoned" alle ~0,5s ohne Ende). Bisher tat
+                // dieser Callback nichts, obwohl handler.startPreview()/rebindSurface() die
+                // gerade zerstoerte Surface unveraendert weiterbedienten. stopPreview() ist hier
+                // sicher: falls fuer DIESELBE Kamera kurz danach eine neue Surface entsteht
+                // (z.B. reiner Screen-Wechsel ohne Kamera-Switch), startet startPreview() den
+                // Stream ueber handler.startPreview(surface) sauber neu (kein rebindSurface()
+                // mehr moeglich, da isPreviewing dann false ist) - minimal teurer, aber korrekt.
+                // Wechselt die Kamera dagegen weg (dieser Fall), bleibt der native Thread nicht
+                // mehr verwaist zurueck.
+                handlerFor(camera)?.stopPreview()
             }
         })
 
@@ -1167,11 +1179,35 @@ class UvcCameraBridge(
     private val pendingPermissionRequests = ArrayDeque<UsbDevice>()
     private var permissionRequestInFlight = false
 
+    /** ROOT CAUSE FIX 2026-07-22 (Nachfolge-Fund zum obigen In-Flight-Fix): Die vendored
+     * `USBMonitor.mDeviceCheckRunnable` (Bibliotheks-Quellcode, alle 2s per Polling) feuert
+     * `onAttach()` NICHT nur fuer neu angesteckte Geraete, sondern fuer ALLE aktuell
+     * angeschlossenen Geraete erneut, sobald sich bei IRGENDEINEM Geraet die Anzahl der
+     * berechtigten Geraete aendert (`if ((n > mDeviceCounts) || (m > hasPermissionCounts))`
+     * -> Schleife `for (i in 0 until n) onAttach(devices[i])` ueber ALLE Geraete, siehe
+     * `USBMonitor.java`). Sobald z.B. Kamera A ihre Berechtigung bekommt, feuert die
+     * Bibliothek `onAttach()` DANACH nochmal fuer A UND B — auch wenn B's Anfrage bereits
+     * laeuft oder A laengst verbunden ist. Ohne Schutz wuerde das bereits verarbeitete
+     * Geraet ein zweites Mal in die Warteschlange eingereiht, was die strikte
+     * Ein-Anfrage-nach-der-anderen-Reihenfolge durcheinanderbringen und die urspruengliche
+     * Kollision (zwei UsbPermissionActivity fast gleichzeitig, eine mit result code=3
+     * abgewiesen) wieder ermoeglichen kann. Fix: pro physischem Geraet (deviceName = stabiler
+     * USB-Bus-Pfad) nur EINMAL verarbeiten, bis es tatsaechlich getrennt wird (onDettach/
+     * onDisconnect setzen den Eintrag zurueck, ein echtes Replug wird wieder frisch gefragt).
+     * Macht die Queue unabhaengig davon, wie oft die Bibliothek onAttach() fuer dasselbe
+     * Geraet wiederholt — deshalb robust gegen diese UND aehnliche zukuenftige Bibliotheks-
+     * Wiederholungen, nicht nur gegen den einen beobachteten Zeitpunkt. */
+    private val handledDeviceNames = mutableSetOf<String>()
+
     private fun requestPermissionQueued(device: UsbDevice) {
+        // Defensiv zusaetzlich zur handledDeviceNames-Sperre in onAttach: nie denselben
+        // Geraetepfad doppelt in die Warteschlange legen, egal von wo aus aufgerufen.
+        if (pendingPermissionRequests.any { it.deviceName == device.deviceName }) return
         pendingPermissionRequests.add(device)
         processNextPermissionRequest()
     }
 
+    @Synchronized
     private fun processNextPermissionRequest() {
         if (permissionRequestInFlight) return
         val next = pendingPermissionRequests.removeFirstOrNull() ?: return
@@ -1184,6 +1220,14 @@ class UvcCameraBridge(
             Log.v(TAG, "onAttach: $device")
             attachedDevices.add(device.deviceName)
             mainHandler.post { listener.onAttachedCameraCountChanged(attachedDevices.size) }
+            // ROOT CAUSE FIX 2026-07-22 (siehe handledDeviceNames-Kommentar): dieses Geraet
+            // schon einmal verarbeitet? Dann ignorieren — die Bibliothek feuert onAttach()
+            // wiederholt fuer bereits bekannte Geraete, sobald sich woanders die Permission-
+            // Anzahl aendert.
+            if (!handledDeviceNames.add(device.deviceName)) {
+                Log.v(TAG, "onAttach: $device bereits verarbeitet, ignoriere Wiederholung")
+                return
+            }
             // Nur fuer noch freie Kamera-Slots (L/R) um Permission fragen — sonst wuerde bei
             // jedem beliebigen dritten USB-Geraet unnoetig ein Dialog aufpoppen.
             val freeSlotAvailable = handlerL?.isOpened != true || handlerR?.isOpened != true
@@ -1314,12 +1358,16 @@ class UvcCameraBridge(
             // Disconnect faelschlich dauerhaft "claimed" und ein Reconnect bekommt nie mehr
             // diesen Slot zugewiesen.
             setSlotClaimed(slot, false)
+            // Siehe handledDeviceNames-Kommentar: bei echtem Disconnect zuruecksetzen, damit
+            // ein Reconnect desselben Geraets wieder frisch verarbeitet wird.
+            handledDeviceNames.remove(device.deviceName)
             mainHandler.post { listener.onCameraClosed(slot) }
         }
 
         override fun onDettach(device: UsbDevice) {
             Log.v(TAG, "onDettach: $device")
             attachedDevices.remove(device.deviceName)
+            handledDeviceNames.remove(device.deviceName)
             mainHandler.post { listener.onAttachedCameraCountChanged(attachedDevices.size) }
         }
 

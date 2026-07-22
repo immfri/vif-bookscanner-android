@@ -39,6 +39,20 @@ See [NOTICE](NOTICE) for the full explanation of why this split exists and is le
 
 Full concept/development history (internal only, not part of this repo): `04-projects/vif-bookscanner/android/plan-2026-07-21-android-portierung.md` in the private KI-OS vault.
 
+## How the app works
+
+**Hardware/driver layer.** `USBMonitor` (from `libuvccamera`) detects the two attached UVC webcams and requests USB permission for each. `UvcCameraBridge` (`bookscanner-app/hardware/`) owns one `UVCCameraHandler` per physical slot (LEFT/RIGHT), assigned as devices connect. Each handler wraps one `UVCCamera` instance bound to a Compose `AndroidView` (`UvcPreview`) that supplies the rendering `Surface`.
+
+**Preview vs. capture.** UVC webcams on USB2 can't stream two resolutions at once, so the app always runs at low-res preview (dynamically chosen close to 320x240 from the camera's real supported-size list) and switches to the camera's maximum reported resolution only for the instant of capture, then switches back. The switch is a full `close()`+`open()` cycle on the same retained `UsbControlBlock` (`reopenAtSize()`), not the driver's in-place `resize()` (see NOTICE for why). Both cameras can run this at full resolution *simultaneously* — verified live, parallel dual capture takes ~3.3–4.0s total for both pages.
+
+**Calibration.** Auto mode lets the camera's own auto-focus/auto-white-balance settle, reads the resulting values, then locks them (no drift between shots) — followed by a focus sweep (systematic scan across the whole focus range) that measures sharpness (Laplacian variance) at each step and keeps the true measured peak as the final focus value, more precise than trusting the auto-focus end value alone. Two reference sharpness values are stored (one at full capture resolution, one at preview resolution) since preview resolution alone doesn't resolve fine text detail reliably.
+
+**Per-capture verification.** Instead of a fixed "recalibrate every N shots" interval (no reliable number exists in the literature for this), every single capture: (1) re-sends the locked focus value to the driver (UVC webcams can silently reset focus on USB reconnect/standby — a plain re-apply, not a new auto-focus run), (2) measures the resulting image's sharpness and compares it against the calibration reference within a configurable tolerance band, optionally auto-correcting the focus value (via the stored sweep curve, not blind guessing) for the *next* shot if it drifted outside tolerance.
+
+**State flow (Compose UI):** `MainActivity` → `ScannerViewModel` (state machine: CALIBRATION → LOCK → PREVIEW → CAPTURE → RECHECK → SETUP, see `state/ScannerState.kt`) → `CalibrationScreen` (per-camera calibration + manual controls) → `SettingsScreen` (project/page naming, rotation, L/R swap, sharpness tolerance) → main capture screen (`BookscannerApp.kt`, split live preview + Capture button). A start-gate (`DeviceGateScreen`) blocks the whole app below 2 attached USB cameras.
+
+**Storage.** Captured JPEGs are written directly (no re-encode) to app-private storage as `{ProjectName}_S{Page:04d}_{L|R}.jpg` via `ScanStorageRepository`, with the capture timestamp written into EXIF (not the filename) so filenames stay simply sortable.
+
 ## Build
 
 Standard Android Gradle build:
@@ -55,10 +69,13 @@ Requires Android SDK + NDK (see `local.properties`).
 
 The original `library and sample to access to UVC web camera on non-rooted Android device` code by saki4510t forms the technical basis of the `libuvccamera`/`usbCameraCommon` modules as well as the `usbCameraTestN` sample projects. Original changelog: [github.com/saki4510t/UVCCamera](https://github.com/saki4510t/UVCCamera).
 
-Key modernizations compared to the original (details in [NOTICE](NOTICE) and this repo's git history):
+Key modernizations compared to the original — **full list with exact rationale in [NOTICE](NOTICE)** (legally required changelog under Apache 2.0 §4(d)), short version here:
 - JCenter (shut down 2021/22) → mavenCentral/google
 - Android Gradle Plugin 3.1.4 → 8.5.2, Gradle Wrapper 4.4 → 8.7
 - `ndk-build`/`Android.mk` → CMake
 - AndroidX migration
-- Several Android 12/13/14 runtime compatibility fixes (PendingIntent flags, `RECEIVER_EXPORTED`, USB permission timing)
-- Real implementation of `resize()` (was a permanent `UnsupportedOperationException` stub in the original)
+- Real implementation of `resize()` (was a permanent `UnsupportedOperationException` stub in the original) — later superseded at the app layer by full close+reopen cycles, see NOTICE
+- A native data race (`CallbackPipeline::do_capture()`) and an unconditional JNI `DetachCurrentThread()` bug, both causing native crashes under repeated reopen cycles
+- Several Android 12/13/14 runtime compatibility fixes (`PendingIntent` flags, `RECEIVER_EXPORTED`, USB permission timing)
+- Two rounds of USB permission request-queue fixes for simultaneous dual-camera cold start (sequential in-flight queue, then a dedup fix against the vendored library re-firing `onAttach()` for already-handled devices)
+- An orphaned-preview-stream fix (`onSurfaceDestroy()` now actually stops the deselected camera's preview instead of leaving it running against a destroyed `Surface` indefinitely)

@@ -35,14 +35,74 @@ ambiguous:
 Notable changes to the Apache-2.0-licensed portions since 2026 (Copyright
 (c) 2026 Immanuel Friedrichsen, licensed under the same Apache License 2.0,
 as required by Section 4(b)):
-  - Toolchain modernization: replaced JCenter (repository shut down in
-    2021/22), Android Gradle Plugin 3.1.4 → 8.5.2, ndk-build → CMake,
-    AndroidX migration.
-  - Driver fixes in `libuvccamera`/`usbCameraCommon`: several Android
-    12/13/14 compatibility bugs (PendingIntent flags, RECEIVER_EXPORTED,
-    USB permission race conditions), a real `resize()` implementation
-    (previously a permanent `UnsupportedOperationException` stub in the
-    original), extended UVC control APIs.
 
-For file-specific changes, see this repository's git history
-(github.com/immfri/vif-bookscanner-android) from the fork point onward.
+- **Toolchain modernization**: replaced JCenter (repository shut down in
+  2021/22), Android Gradle Plugin 3.1.4 → 8.5.2, ndk-build → CMake,
+  AndroidX migration.
+- **`resize()` real implementation** (`AbstractUVCCameraHandler`): the
+  original method was a permanent `UnsupportedOperationException` stub —
+  never implemented. All preview↔capture mode switching silently no-oped
+  through this before the fix. Real implementation added: stop preview →
+  `setPreviewSize()` → resume preview on the same surface. Later found
+  in-place `resize()` is unreliable in BOTH directions on this hardware
+  (never delivers a complete frame above 640x480 going up, `Application
+  transferred too few scanlines` on every frame coming back down) — the
+  app layer now always does a full `close()`+`open()` cycle with the
+  retained `UsbControlBlock` instead (`reopenAtSize()` in
+  `bookscanner-app`), not the driver's `resize()`.
+- **Native data race fixed** in `CallbackPipeline::do_capture()`: the
+  frame-delivery thread read shared Java callback references without a
+  mutex while `setFrameCallback()` mutated them under lock elsewhere —
+  caused a `jmethodID was NULL` native crash after several mode-switch
+  cycles.
+- **Unconditional `DetachCurrentThread()` fixed** in
+  `UVCButtonCallback.cpp`/`UVCStatusCallback.cpp`: detached JNI threads
+  that were already attached, causing an `attempting to detach while
+  still running code` native crash on repeated camera reopen cycles
+  (relevant once the app started doing real close+reopen cycles for
+  every capture and mode switch).
+- **Android 12+/13+/14+ USB/permission compatibility fixes**:
+  `PendingIntent` now requires explicit `FLAG_IMMUTABLE`/`FLAG_MUTABLE`
+  (Android 12+); `FLAG_MUTABLE` is forbidden on implicit intents (Android
+  14+) — permission intent is now scoped to the app's own package via
+  `setPackage()`; `registerReceiver()` requires explicit
+  `RECEIVER_EXPORTED`/`RECEIVER_NOT_EXPORTED` (Android 13+);
+  `getSerialNumber()`/`getManufacturerName()` throw `SecurityException`
+  if called before permission is granted (Android 12+) — now called only
+  after permission is confirmed.
+- **USB permission request queuing, two rounds of fixes**: (1) when two
+  UVC devices attach at once (dual-camera cold start), two simultaneous
+  `USBMonitor.requestPermission()` calls collide at the OS level — the
+  second `UsbPermissionActivity` launch is immediately cancelled
+  (`result code=3`) instead of shown, leaving the second camera silently
+  unconnected. Fixed with a strict in-app queue: only one
+  `requestPermission()` in flight at a time, the next is fired only after
+  `onConnect()`/`onCancel()` resolves the previous one. (2) Root-cause
+  follow-up found that the vendored `USBMonitor.mDeviceCheckRunnable`
+  (background poller, `USBMonitor.java`) re-fires `onAttach()` for **all**
+  currently attached devices whenever *any* device's permission count
+  changes — not just the newly attached one. Without a guard this could
+  re-enqueue an already-handled device into the sequential queue,
+  reopening the original collision. Fixed at the app layer by tracking
+  already-handled device paths (`handledDeviceNames`, keyed by the stable
+  USB bus device name) and ignoring repeat `onAttach()` calls for a
+  device until it is actually detached.
+- **Orphaned preview stream root-caused**: `onSurfaceDestroy()` did
+  nothing besides logging — switching the active camera slot (e.g. LEFT →
+  RIGHT) left the native preview thread of the deselected camera running
+  indefinitely against an already-destroyed `Surface` (`BufferQueue has
+  been abandoned` every ~0.5s, no upper bound observed). A device left in
+  this state this way was found to stay in a broken
+  `Application transferred too few scanlines` state even across a full
+  app process restart — only a physical USB replug recovered it (no
+  public, root-free Android API exists to force a USB port reset). Fixed
+  by calling `stopPreview()` for the deselected camera on
+  `onSurfaceDestroy()`.
+- Extended UVC control APIs (exposed to the app layer): focus, white
+  balance, brightness, contrast, sharpness, gain, gamma, saturation, hue,
+  zoom — auto and manual, plus dynamic supported-resolution querying.
+
+For file-specific changes and exact line numbers, see this repository's
+git history (github.com/immfri/vif-bookscanner-android) from the fork
+point onward — each fix above corresponds to one or more commits with a
+descriptive message.
